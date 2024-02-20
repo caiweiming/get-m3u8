@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="zh-CN" dir="ltr">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
+    <title>M3U8媒体下载工具</title>
+    <meta name="keywords" content="m3u8 下载工具">
+    <meta name="description" content="m3u8 下载工具,无需下载软件,打开网站即可下载,自动检测,一键下载">
+    <link rel="stylesheet" href="/static/css/normalize.css">
+    <link rel="stylesheet" href="/static/css/reset.css">
+    <link rel="stylesheet" href="/static/css/animate.min.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div id="app" v-cloak>
+    <div class="layout">
+        <header class="header">
+            <div class="logo">
+                <h1>
+                    <a href="/">
+                        <img src="/static/img/logo.png" alt="">
+                        <span>M3U8下载</span>
+                    </a>
+                </h1>
+            </div>
+            <div class="tools">
+                <div style="flex: auto"></div>
+
+                <button class="icon-button" title="全局设置" @click="showModal('modal-setting')">
+                    <span role="img" class="icon">
+                        <svg width="1rem" height="1rem" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M36.686 15.171C37.9364 16.9643 38.8163 19.0352 39.2147 21.2727H44V26.7273H39.2147C38.8163 28.9648 37.9364 31.0357 36.686 32.829L40.0706 36.2137L36.2137 40.0706L32.829 36.686C31.0357 37.9364 28.9648 38.8163 26.7273 39.2147V44H21.2727V39.2147C19.0352 38.8163 16.9643 37.9364 15.171 36.686L11.7863 40.0706L7.92939 36.2137L11.314 32.829C10.0636 31.0357 9.18372 28.9648 8.78533 26.7273H4V21.2727H8.78533C9.18372 19.0352 10.0636 16.9643 11.314 15.171L7.92939 11.7863L11.7863 7.92939L15.171 11.314C16.9643 10.0636 19.0352 9.18372 21.2727 8.78533V4H26.7273V8.78533C28.9648 9.18372 31.0357 10.0636 32.829 11.314L36.2137 7.92939L40.0706 11.7863L36.686 15.171Z" fill="#222222" stroke="#222222" stroke-width="3" stroke-linejoin="round"/><path d="M24 29C26.7614 29 29 26.7614 29 24C29 21.2386 26.7614 19 24 19C21.2386 19 19 21.2386 19 24C19 26.7614 21.2386 29 24 29Z" fill="#FFF" stroke="#FFF" stroke-width="3" stroke-linejoin="round"/></svg>
+                    </span>
+                </button>
+                <button class="icon-button" title="使用说明" @click="showModal('modal-help')">
+                    <span role="img" class="icon">
+                        <svg width="1rem" height="1rem" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M24 44C29.5228 44 34.5228 41.7614 38.1421 38.1421C41.7614 34.5228 44 29.5228 44 24C44 18.4772 41.7614 13.4772 38.1421 9.85786C34.5228 6.23858 29.5228 4 24 4C18.4772 4 13.4772 6.23858 9.85786 9.85786C6.23858 13.4772 4 18.4772 4 24C4 29.5228 6.23858 34.5228 9.85786 38.1421C13.4772 41.7614 18.4772 44 24 44Z" fill="#222222" stroke="#222222" stroke-width="3" stroke-linejoin="round"/><path d="M24 28.6248V24.6248C27.3137 24.6248 30 21.9385 30 18.6248C30 15.3111 27.3137 12.6248 24 12.6248C20.6863 12.6248 18 15.3111 18 18.6248" stroke="#FFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path fill-rule="evenodd" clip-rule="evenodd" d="M24 37.6248C25.3807 37.6248 26.5 36.5055 26.5 35.1248C26.5 33.7441 25.3807 32.6248 24 32.6248C22.6193 32.6248 21.5 33.7441 21.5 35.1248C21.5 36.5055 22.6193 37.6248 24 37.6248Z" fill="#FFF"/></svg>
+                    </span>
+                </button>
+                <a href="https://github.com/caiweiming/get-m3u8" title="开源代码" target="_blank" rel="noreferrer">
+                    <button class="icon-button">
+                        <span role="img" class="icon">
+                            <svg viewBox="64 64 896 896" focusable="false" data-icon="github" width="1rem" height="1rem" fill="currentColor"
+                                                           aria-hidden="true"><path
+                                d="M511.6 76.3C264.3 76.2 64 276.4 64 523.5 64 718.9 189.3 885 363.8 946c23.5 5.9 19.9-10.8 19.9-22.2v-77.5c-135.7 15.9-141.2-73.9-150.3-88.9C215 726 171.5 718 184.5 703c30.9-15.9 62.4 4 98.9 57.9 26.4 39.1 77.9 32.5 104 26 5.7-23.5 17.9-44.5 34.7-60.8-140.6-25.2-199.2-111-199.2-213 0-49.5 16.3-95 48.3-131.7-20.4-60.5 1.9-112.3 4.9-120 58.1-5.2 118.5 41.6 123.2 45.3 33-8.9 70.7-13.6 112.9-13.6 42.4 0 80.2 4.9 113.5 13.9 11.3-8.6 67.3-48.8 121.3-43.9 2.9 7.7 24.7 58.3 5.5 118 32.4 36.8 48.9 82.7 48.9 132.3 0 102.2-59 188.1-200 212.9a127.5 127.5 0 0138.1 91v112.5c.8 9 0 17.9 15 17.9 177.1-59.7 304.6-227 304.6-424.1 0-247.2-200.4-447.3-447.5-447.3z"></path></svg>
+                        </span>
+                    </button>
+                </a>
+            </div>
+        </header>
+        <main class="main">
+            <div class="empty empty-normal" v-if="!tasks.length">
+                <div class="empty-image">
+                    <svg width="64" height="41" viewBox="0 0 64 41" xmlns="http://www.w3.org/2000/svg"><g transform="translate(0 1)" fill="none" fill-rule="evenodd"><ellipse fill="#f5f5f5" cx="32" cy="33" rx="32" ry="7"></ellipse><g fill-rule="nonzero" stroke="#d9d9d9"><path d="M55 12.76L44.854 1.258C44.367.474 43.656 0 42.907 0H21.093c-.749 0-1.46.474-1.947 1.257L9 12.761V22h46v-9.24z"></path><path d="M41.613 15.931c0-1.605.994-2.93 2.227-2.931H55v18.137C55 33.26 53.68 35 52.05 35h-40.1C10.32 35 9 33.259 9 31.137V13h11.16c1.233 0 2.227 1.323 2.227 2.928v.022c0 1.605 1.005 2.901 2.237 2.901h14.752c1.232 0 2.237-1.308 2.237-2.913v-.007z" fill="#fafafa"></path></g></g></svg>
+                </div>
+                <div class="empty-description">新建下载 / 粘贴链接</div>
+                <div class="empty-footer">
+                    <button type="button" class="btn btn-primary" @click="add">
+                        <span>新建下载</span>
+                    </button>
+                </div>
+            </div>
+            <div class="actions" v-if="tasks.length">
+                <label class="checkbox-wrapper">
+                    <span class="checkbox" :class="{'checkbox-checked': isAllChecked}" @click="checkAll">
+                        <input class="checkbox-input" type="checkbox">
+                        <span class="checkbox-inner"></span>
+                    </span>
+                    <span>全选</span>
+                </label>
+                <button type="button" class="btn btn-text btn-danger" v-if="isChecked" @click="deleteTask"><span>删除</span></button>
+                <button type="button" class="btn btn-text" v-if="isChecked" @click="start"><span>开始</span></button>
+                <button type="button" class="btn btn-text" v-if="isChecked" @click="pause"><span>暂停</span></button>
+                <button type="button" class="btn btn-primary" @click="add">
+                    <span class="btn-icon">
+                        <span role="img" class="icon">
+                            <svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"
+                                 width="14px" height="14px"><path
+                                    d="M511.3 64.2c-247.1 0-447.4 200.3-447.4 447.4S264.2 959 511.3 959s447.4-200.3 447.4-447.4S758.4 64.2 511.3 64.2z m244.1 488.1H552v203.4c0 22.5-18.2 40.7-40.7 40.7-22.5 0-40.7-18.2-40.7-40.7V552.3H267.3c-22.5 0-40.7-18.2-40.7-40.7 0-22.5 18.2-40.7 40.7-40.7h203.4V267.6c0-22.5 18.2-40.7 40.7-40.7 22.5 0 40.7 18.2 40.7 40.7V471h203.4c22.5 0 40.7 18.2 40.7 40.7-0.1 22.4-18.4 40.6-40.8 40.6z"
+                                    fill="currentColor"></path></svg>
+                        </span>
+                    </span>
+                    <span>新建</span>
+                </button>
+            </div>
+            <div class="items">
+                <div class="item" :class="{'item-checked': item.checked}" v-for="(item, index) in tasks" :key="index">
+                    <div class="item-selection">
+                        <label class="checkbox-wrapper">
+                            <span class="checkbox" :class="{'checkbox-checked': item.checked}" @click="item.checked = !item.checked">
+                                <input class="checkbox-input" type="checkbox">
+                                <span class="checkbox-inner"></span></span>
+                        </label>
+                    </div>
+                    <div class="item-content">
+                        <div class="item-title">
+                            <span class="tag">
+                                <span>{{item.type}}</span>
+                            </span>
+                            {{item.title}}
+                            <span class="tags">
+                                <span class="tag">
+                                    <span>{{ formatDuration(item.durationSecond) }}</span>
+                                </span>
+                                <a href="javascript:void(0);" @click="showSegment(item)" v-if="item.errorNum">
+                                    <span class="tag tag-error">
+                                        <span role="img" class="icon">
+                                            <svg fill-rule="evenodd" viewBox="64 64 896 896" focusable="false" data-icon="close-circle" width="1em" height="1em" fill="currentColor" aria-hidden="true"><path d="M512 64c247.4 0 448 200.6 448 448S759.4 960 512 960 64 759.4 64 512 264.6 64 512 64zm0 76c-205.4 0-372 166.6-372 372s166.6 372 372 372 372-166.6 372-372-166.6-372-372-372zm128.01 198.83c.03 0 .05.01.09.06l45.02 45.01a.2.2 0 01.05.09.12.12 0 010 .07c0 .02-.01.04-.05.08L557.25 512l127.87 127.86a.27.27 0 01.05.06v.02a.12.12 0 010 .07c0 .03-.01.05-.05.09l-45.02 45.02a.2.2 0 01-.09.05.12.12 0 01-.07 0c-.02 0-.04-.01-.08-.05L512 557.25 384.14 685.12c-.04.04-.06.05-.08.05a.12.12 0 01-.07 0c-.03 0-.05-.01-.09-.05l-45.02-45.02a.2.2 0 01-.05-.09.12.12 0 010-.07c0-.02.01-.04.06-.08L466.75 512 338.88 384.14a.27.27 0 01-.05-.06l-.01-.02a.12.12 0 010-.07c0-.03.01-.05.05-.09l45.02-45.02a.2.2 0 01.09-.05.12.12 0 01.07 0c.02 0 .04.01.08.06L512 466.75l127.86-127.86c.04-.05.06-.06.08-.06a.12.12 0 01.07 0z"></path></svg>
+                                        </span>
+                                        <span>错误: {{ item.errorNum }}</span>
+                                    </span>
+                                </a>
+                                <span class="tag tag-processing" v-if="item.status === 'downloading'">
+                                    <span role="img" class="icon icon-spin">
+                                        <svg viewBox="64 64 896 896" focusable="false" data-icon="sync" width="1em" height="1em" fill="currentColor" aria-hidden="true"><path d="M168 504.2c1-43.7 10-86.1 26.9-126 17.3-41 42.1-77.7 73.7-109.4S337 212.3 378 195c42.4-17.9 87.4-27 133.9-27s91.5 9.1 133.8 27A341.5 341.5 0 01755 268.8c9.9 9.9 19.2 20.4 27.8 31.4l-60.2 47a8 8 0 003 14.1l175.7 43c5 1.2 9.9-2.6 9.9-7.7l.8-180.9c0-6.7-7.7-10.5-12.9-6.3l-56.4 44.1C765.8 155.1 646.2 92 511.8 92 282.7 92 96.3 275.6 92 503.8a8 8 0 008 8.2h60c4.4 0 7.9-3.5 8-7.8zm756 7.8h-60c-4.4 0-7.9 3.5-8 7.8-1 43.7-10 86.1-26.9 126-17.3 41-42.1 77.8-73.7 109.4A342.45 342.45 0 01512.1 856a342.24 342.24 0 01-243.2-100.8c-9.9-9.9-19.2-20.4-27.8-31.4l60.2-47a8 8 0 00-3-14.1l-175.7-43c-5-1.2-9.9 2.6-9.9 7.7l-.7 181c0 6.7 7.7 10.5 12.9 6.3l56.4-44.1C258.2 868.9 377.8 932 512.2 932c229.2 0 415.5-183.7 419.8-411.8a8 8 0 00-8-8.2z"></path></svg>
+                                    </span>
+                                    <span class="percent">{{ getProgress(item) }}%</span>
+                                </span>
+                                <span class="tag tag-default" v-if="item.rangeDownload.isShowRange">
+                                    <span role="img" class="icon">
+                                        <svg viewBox="64 64 896 896" focusable="false" data-icon="exclamation-circle" width="1em" height="1em" fill="currentColor" aria-hidden="true"><path d="M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64zm0 820c-205.4 0-372-166.6-372-372s166.6-372 372-372 372 166.6 372 372-166.6 372-372 372z"></path><path d="M464 688a48 48 0 1096 0 48 48 0 10-96 0zm24-112h48c4.4 0 8-3.6 8-8V296c0-4.4-3.6-8-8-8h-48c-4.4 0-8 3.6-8 8v272c0 4.4 3.6 8 8 8z"></path></svg>
+                                    </span>
+                                    <span>范围下载：{{ item.rangeDownload.startSegment }} - {{ item.rangeDownload.endSegment }}</span>
+                                </span>
+                                <span class="tag tag-success" v-if="item.status === 'done'">
+                                    <span role="img" class="icon">
+                                        <svg viewBox="64 64 896 896" focusable="false" data-icon="check-circle" width="1em" height="1em" fill="currentColor" aria-hidden="true"><path d="M699 353h-46.9c-10.2 0-19.9 4.9-25.9 13.3L469 584.3l-71.2-98.8c-6-8.3-15.6-13.3-25.9-13.3H325c-6.5 0-10.3 7.4-6.5 12.7l124.6 172.8a31.8 31.8 0 0051.7 0l210.6-292c3.9-5.3.1-12.7-6.4-12.7z"></path><path d="M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64zm0 820c-205.4 0-372-166.6-372-372s166.6-372 372-372 372 166.6 372 372-166.6 372-372 372z"></path></svg>
+                                    </span>
+                                    <span>完成</span>
+                                </span>
+                                <span class="tag tag-default" v-if="item.status === 'ready'">
+                                    <span role="img" class="icon">
+                                        <svg viewBox="64 64 896 896" focusable="false" data-icon="clock-circle" width="1em" height="1em" fill="currentColor" aria-hidden="true"><path d="M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64zm0 820c-205.4 0-372-166.6-372-372s166.6-372 372-372 372 166.6 372 372-166.6 372-372 372z"></path><path d="M686.7 638.6L544.1 535.5V288c0-4.4-3.6-8-8-8H488c-4.4 0-8 3.6-8 8v275.4c0 2.6 1.2 5 3.3 6.5l165.4 120.6c3.6 2.6 8.6 1.8 11.2-1.7l28.6-39c2.6-3.7 1.8-8.7-1.8-11.2z"></path></svg>
+                                    </span>
+                                    <span>等待中</span>
+                                </span>
+                                <span class="tag tag-warning" v-if="item.status === 'pause'">
+                                    <span role="img" class="icon">
+                                        <svg viewBox="64 64 896 896" focusable="false" data-icon="exclamation-circle" width="1em" height="1em" fill="currentColor" aria-hidden="true"><path d="M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64zm0 820c-205.4 0-372-166.6-372-372s166.6-372 372-372 372 166.6 372 372-166.6 372-372 372z"></path><path d="M464 688a48 48 0 1096 0 48 48 0 10-96 0zm24-112h48c4.4 0 8-3.6 8-8V296c0-4.4-3.6-8-8-8h-48c-4.4 0-8 3.6-8 8v272c0 4.4 3.6 8 8 8z"></path></svg>
+                                    </span>
+                                    <span>已暂停</span>
+                                </span>
+                                <a href="javascript:void(0);" @click="forceDownload" v-if="item.status === 'pause'">
+                                    <span class="tag tag-default">
+                                        <span role="img" class="icon">
+                                            <svg width="1em" height="1em" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M23.9999 29.0001L12 17.0001L19.9999 17.0001L19.9999 6.00011L27.9999 6.00011L27.9999 17.0001L35.9999 17.0001L23.9999 29.0001Z" fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M42 37L6 37" stroke="#000000" stroke-width="3" stroke-linecap="round"/><path d="M34 44H14" stroke="#000000" stroke-width="3" stroke-linecap="round"/></svg>
+                                        </span>
+                                        <span>保存现有片段</span>
+                                    </span>
+                                </a>
+                                <span class="tag tag-default" v-if="item.retryCountdown">
+                                    <span role="img" class="icon">
+                                        <svg viewBox="64 64 896 896" focusable="false" data-icon="clock-circle" width="1em" height="1em" fill="currentColor" aria-hidden="true"><path d="M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64zm0 820c-205.4 0-372-166.6-372-372s166.6-372 372-372 372 166.6 372 372-166.6 372-372 372z"></path><path d="M686.7 638.6L544.1 535.5V288c0-4.4-3.6-8-8-8H488c-4.4 0-8 3.6-8 8v275.4c0 2.6 1.2 5 3.3 6.5l165.4 120.6c3.6 2.6 8.6 1.8 11.2-1.7l28.6-39c2.6-3.7 1.8-8.7-1.8-11.2z"></path></svg>
+                                    </span>
+                                    <span>{{item.retryCountdown}}秒后重试</span>
+                                </span>
+                            </span>
+                        </div>
+                        <div class="item-url" @click="copyToClipboard(item.url)">
+                            <svg width="16" height="16" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M13 38H41V16H30V4H13V38Z" fill="#a6a6a6" stroke="#a6a6a6" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M30 4L41 16" stroke="#a6a6a6" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M7 20V44H28" stroke="#a6a6a6" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 20H23" stroke="#FFF" stroke-width="3" stroke-linecap="round"/><path d="M19 28H31" stroke="#FFF" stroke-width="3" stroke-linecap="round"/></svg>
+                            {{item.url}}
+                        </div>
+                        <div class="progress progress-line progress-show-info progress-default" @click="showSegment(item)" :class="{'progress-status-active': item.status === 'downloading', 'progress-status-success': item.status === 'done'}" role="progressbar">
+                            <div class="progress-outer">
+                                <div class="progress-inner">
+                                    <div class="progress-bg" :style="{'width': getProgress(item) + '%'}"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="item-action">
+                        <button class="icon-button" v-if="item.status === 'ready'" @click="item.status='pause'" title="等待下载">
+                            <span role="img" class="icon">
+                                <svg width="1rem" height="1rem" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M7 4H41" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M7 44H41" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 44C13.6667 30.6611 18 23.9944 24 24C30 24.0056 34.3333 30.6722 37 44H11Z" fill="none" stroke="#000000" stroke-width="3" stroke-linejoin="round"/><path d="M37 4C34.3333 17.3389 30 24.0056 24 24C18 23.9944 13.6667 17.3278 11 4H37Z" fill="none" stroke="#000000" stroke-width="3" stroke-linejoin="round"/></svg>
+                            </span>
+                        </button>
+                        <button class="icon-button" v-if="item.status === 'pause'" @click="togglePause(item)" title="开始下载">
+                            <span role="img" class="icon">
+                                <svg width="1rem" height="1rem" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M11.6777 20.271C7.27476 21.3181 4 25.2766 4 30C4 35.5228 8.47715 40 14 40C14.9474 40 15.864 39.8683 16.7325 39.6221" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M36.0547 20.271C40.4577 21.3181 43.7324 25.2766 43.7324 30C43.7324 35.5228 39.2553 40 33.7324 40C32.785 40 31.8684 39.8683 30.9999 39.6221" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M36 20C36 13.3726 30.6274 8 24 8C17.3726 8 12 13.3726 12 20" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M17.0654 30.119L23.9999 37.0764L31.1318 30" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M24 20V33.5382" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                            </span>
+                        </button>
+                        <button class="icon-button" v-if="item.status === 'downloading'" @click="togglePause(item)" title="暂停下载">
+                            <span role="img" class="icon">
+                                <svg width="1rem" height="1rem" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M24 44C35.0457 44 44 35.0457 44 24C44 12.9543 35.0457 4 24 4C12.9543 4 4 12.9543 4 24C4 35.0457 12.9543 44 24 44Z" fill="none" stroke="#000000" stroke-width="3" stroke-linejoin="round"/><path d="M19 18V30" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M29 18V30" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                            </span>
+                        </button>
+                        <button class="icon-button" v-if="item.status === 'done'" @click="forceDownload" title="保存视频">
+                            <span role="img" class="icon">
+                                <svg width="1rem" height="1rem" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M23.9999 29.0001L12 17.0001L19.9999 17.0001L19.9999 6.00011L27.9999 6.00011L27.9999 17.0001L35.9999 17.0001L23.9999 29.0001Z" fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M42 37L6 37" stroke="#000000" stroke-width="3" stroke-linecap="round"/><path d="M34 44H14" stroke="#000000" stroke-width="3" stroke-linecap="round"/></svg>
+                            </span>
+                        </button>
+                        <button class="icon-button" title="播放视频" @click="play(item.url)">
+                            <span role="img" class="icon">
+                                <svg width="1rem" height="1rem" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M24 44C35.0457 44 44 35.0457 44 24C44 12.9543 35.0457 4 24 4C12.9543 4 4 12.9543 4 24C4 35.0457 12.9543 44 24 44Z" fill="none" stroke="#000000" stroke-width="3" stroke-linejoin="round"/><path d="M20 24V17.0718L26 20.5359L32 24L26 27.4641L20 30.9282V24Z" fill="none" stroke="#000000" stroke-width="3" stroke-linejoin="round"/></svg>
+                            </span>
+                        </button>
+                        <button class="icon-button" @click="deleteTask(index)" title="删除任务">
+                            <span role="img" class="icon">
+                                <svg width="1rem" height="1rem" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M24 44C35.0457 44 44 35.0457 44 24C44 12.9543 35.0457 4 24 4C12.9543 4 4 12.9543 4 24C4 35.0457 12.9543 44 24 44Z" fill="none" stroke="#000000" stroke-width="3" stroke-linejoin="round"/><path d="M29.6567 18.3432L18.343 29.6569" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M18.3433 18.3432L29.657 29.6569" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                            </span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </main>
+        <footer class="footer">
+            © getM3U8.com 2024. All rights reserved. <a href="mailto:getm3u8@163.com" class="has-text-danger">上报错误</a>
+        </footer>
+    </div>
+
+    <div class="tooltip tooltip-placement-bottom" :class="{
+    'tooltip-hidden': item.hidden,
+    'zoom-big-fast-enter-start': item.start,
+    'zoom-big-fast-enter zoom-big-fast': item.enter,
+    'zoom-big-fast-enter-prepare': item.prepare,
+    'zoom-big-fast-enter-active': item.active,
+    'zoom-big-fast-leave zoom-big-fast-leave-active': item.leave,
+    }" :id="index" v-for="(item, index) in tooltipList" :key="index">
+        <div class="tooltip-arrow" :style="{left: item.arrowLeft + 'px'}"></div>
+        <div class="tooltip-content">
+            <div class="tooltip-inner">{{item.title}}</div>
+        </div>
+    </div>
+
+    <div class="message message-top">
+        <div class="message-notice-wrapper" :class="{'message-move-up-appear message-move-up-appear-active message-move-up': item.appear, 'message-move-up-leave message-move-up-leave-active message-move-up': item.leave}" v-for="(item, index) in messageList" :key="index">
+            <div class="message-notice">
+                <div class="message-notice-content">
+                    <div class="message-custom-content" :class="{'message-success': item.type === 'success', 'message-error': item.type === 'error', 'message-warning': item.type === 'warning', 'message-info': item.type === 'info'}">
+                        <span role="img" class="icon" :class="{'icon-loading icon-spin': item.type === 'loading'}">
+                            <svg v-if="item.type === 'success'" viewBox="64 64 896 896" focusable="false" width="1em" height="1em"
+                            fill="currentColor" aria-hidden="true"><path d="M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64zm193.5 301.7l-210.6 292a31.8 31.8 0 01-51.7 0L318.5 484.9c-3.8-5.3 0-12.7 6.5-12.7h46.9c10.2 0 19.9 4.9 25.9 13.3l71.2 98.8 157.2-218c6-8.3 15.6-13.3 25.9-13.3H699c6.5 0 10.3 7.4 6.5 12.7z"></path></svg>
+                            <svg v-if="item.type === 'error'" fill-rule="evenodd" viewBox="64 64 896 896" focusable="false" data-icon="close-circle" width="1em" height="1em" fill="currentColor" aria-hidden="true"><path d="M512 64c247.4 0 448 200.6 448 448S759.4 960 512 960 64 759.4 64 512 264.6 64 512 64zm127.98 274.82h-.04l-.08.06L512 466.75 384.14 338.88c-.04-.05-.06-.06-.08-.06a.12.12 0 00-.07 0c-.03 0-.05.01-.09.05l-45.02 45.02a.2.2 0 00-.05.09.12.12 0 000 .07v.02a.27.27 0 00.06.06L466.75 512 338.88 639.86c-.05.04-.06.06-.06.08a.12.12 0 000 .07c0 .03.01.05.05.09l45.02 45.02a.2.2 0 00.09.05.12.12 0 00.07 0c.02 0 .04-.01.08-.05L512 557.25l127.86 127.87c.04.04.06.05.08.05a.12.12 0 00.07 0c.03 0 .05-.01.09-.05l45.02-45.02a.2.2 0 00.05-.09.12.12 0 000-.07v-.02a.27.27 0 00-.05-.06L557.25 512l127.87-127.86c.04-.04.05-.06.05-.08a.12.12 0 000-.07c0-.03-.01-.05-.05-.09l-45.02-45.02a.2.2 0 00-.09-.05.12.12 0 00-.07 0z"></path></svg>
+                            <svg v-if="item.type === 'warning'" viewBox="64 64 896 896" focusable="false" data-icon="exclamation-circle" width="1em" height="1em" fill="currentColor" aria-hidden="true"><path d="M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64zm-32 232c0-4.4 3.6-8 8-8h48c4.4 0 8 3.6 8 8v272c0 4.4-3.6 8-8 8h-48c-4.4 0-8-3.6-8-8V296zm32 440a48.01 48.01 0 010-96 48.01 48.01 0 010 96z"></path></svg>
+                            <svg v-if="item.type === 'info'" viewBox="64 64 896 896" focusable="false" data-icon="info-circle" width="1em" height="1em" fill="currentColor" aria-hidden="true"><path d="M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64zm32 664c0 4.4-3.6 8-8 8h-48c-4.4 0-8-3.6-8-8V456c0-4.4 3.6-8 8-8h48c4.4 0 8 3.6 8 8v272zm-32-344a48.01 48.01 0 010-96 48.01 48.01 0 010 96z"></path></svg>
+                            <svg v-if="item.type === 'loading'" viewBox="0 0 1024 1024" focusable="false" data-icon="loading" width="1em" height="1em" fill="currentColor" aria-hidden="true"><path d="M988 548c-19.9 0-36-16.1-36-36 0-59.4-11.6-117-34.6-171.3a440.45 440.45 0 00-94.3-139.9 437.71 437.71 0 00-139.9-94.3C629 83.6 571.4 72 512 72c-19.9 0-36-16.1-36-36s16.1-36 36-36c69.1 0 136.2 13.5 199.3 40.3C772.3 66 827 103 874 150c47 47 83.9 101.8 109.7 162.7 26.7 63.1 40.2 130.2 40.2 199.3.1 19.9-16 36-35.9 36z"></path></svg>
+                        </span>
+                        <span>{{item.content}}</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-root" id="modal-add">
+        <div class="modal-mask" :class="{'fade-enter fade-enter-active': modalList['modal-add'].showing, 'fade-leave fade-leave-active': modalList['modal-add'].closing}" v-if="modalList['modal-add'].show"></div>
+        <div tabindex="-1" class="modal-wrap modal-centered" v-show="modalList['modal-add'].show">
+            <div role="dialog" aria-modal="true" class="modal" :class="{'zoom-enter zoom-enter-active': modalList['modal-add'].showing, 'zoom-leave zoom-leave-active': modalList['modal-add'].closing}" v-show="modalList['modal-add'].show" style="width: 520px;">
+                <div tabindex="0" aria-hidden="true" style="width: 0; height: 0; overflow: hidden; outline: none;"></div>
+                <div class="modal-content">
+                    <button type="button" class="modal-close" @click="closeModal('modal-add')"><span
+                            class="modal-close-x"><span role="img" aria-label="close" class="icon icon-close modal-close-icon"><svg
+                            fill-rule="evenodd" viewBox="64 64 896 896" focusable="false" data-icon="close" width="1em"
+                            height="1em" fill="currentColor" aria-hidden="true"><path
+                            d="M799.86 166.31c.02 0 .04.02.08.06l57.69 57.7c.04.03.05.05.06.08a.12.12 0 010 .06c0 .03-.02.05-.06.09L569.93 512l287.7 287.7c.04.04.05.06.06.09a.12.12 0 010 .07c0 .02-.02.04-.06.08l-57.7 57.69c-.03.04-.05.05-.07.06a.12.12 0 01-.07 0c-.03 0-.05-.02-.09-.06L512 569.93l-287.7 287.7c-.04.04-.06.05-.09.06a.12.12 0 01-.07 0c-.02 0-.04-.02-.08-.06l-57.69-57.7c-.04-.03-.05-.05-.06-.07a.12.12 0 010-.07c0-.03.02-.05.06-.09L454.07 512l-287.7-287.7c-.04-.04-.05-.06-.06-.09a.12.12 0 010-.07c0-.02.02-.04.06-.08l57.7-57.69c.03-.04.05-.05.07-.06a.12.12 0 01.07 0c.03 0 .05.02.09.06L512 454.07l287.7-287.7c.04-.04.06-.05.09-.06a.12.12 0 01.07 0z"></path></svg></span></span>
+                    </button>
+                    <div class="modal-header">
+                        <div class="modal-title">新建下载</div>
+                    </div>
+                    <div class="modal-body">
+                        <div class="form-item">
+                            <div class="form-item-label">
+                                <label for="url" class="form-item-required" title="m3u8地址">M3U8地址</label>
+                            </div>
+                            <div class="form-item-control">
+                                <div class="form-item-control-input">
+                                    <div class="form-item-control-input-content">
+                                        <input ref="url" placeholder="请输入m3u8链接地址" id="url" class="input input-outlined" @input="getTitle" :class="{'input-status-error': urlError}" type="text" v-model="url" value="">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-item">
+                            <div class="form-item-label">
+                                <label for="title" title="保存标题">保存标题</label>
+                            </div>
+                            <div class="form-item-control">
+                                <div class="form-item-control-input">
+                                    <div class="form-item-control-input-content">
+                                        <input placeholder="请输入要保存的标题名称" id="title" class="input input-outlined" type="text" v-model="title" value="">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-item">
+                            <div class="form-item-label">
+                                <label title="保存格式">保存格式</label>
+                            </div>
+                            <div class="form-item-control">
+                                <div class="radio-group radio-group-outline">
+                                    <label class="radio-button-wrapper" :class="{'radio-button-wrapper-checked': type === 'TS'}">
+                                        <span class="radio-button" :class="{'radio-button-checked': type === 'TS'}">
+                                            <input class="radio-button-input" type="radio" v-model="type" value="TS" checked="">
+                                            <span class="radio-button-inner"></span>
+                                        </span>
+                                        <span>TS</span>
+                                    </label>
+                                    <label class="radio-button-wrapper" :class="{'radio-button-wrapper-checked': type === 'MP4'}">
+                                        <span class="radio-button" :class="{'radio-button-checked': type === 'MP4'}">
+                                            <input class="radio-button-input" type="radio" v-model="type" value="MP4">
+                                            <span class="radio-button-inner"></span>
+                                        </span>
+                                        <span>MP4</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-item" v-if="isSupperStreamWrite">
+                            <div class="form-item-label">
+                                <label title="边下边存">边下边存<span class="form-item-optional">（开启后可以解决大文件下载内存不足的问题）</span></label>
+                            </div>
+                            <div class="form-item-control">
+                                <div class="radio-group radio-group-outline">
+                                    <label class="radio-button-wrapper" :class="{'radio-button-wrapper-checked': stream === false}">
+                                        <span class="radio-button" :class="{'radio-button-checked': stream}">
+                                            <input class="radio-button-input" type="radio" v-model="stream" :value="false">
+                                            <span class="radio-button-inner"></span>
+                                        </span>
+                                        <span>否</span>
+                                    </label>
+                                    <label class="radio-button-wrapper" :class="{'radio-button-wrapper-checked': stream === true}">
+                                        <span class="radio-button" :class="{'radio-button-checked': stream}">
+                                            <input class="radio-button-input" type="radio" v-model="stream" :value="true">
+                                            <span class="radio-button-inner"></span>
+                                        </span>
+                                        <span>是</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-default" @click="play(url)">
+                            <span>播放视频</span>
+                        </button>
+                        <button type="button" class="btn btn-default" @click="setRange">
+                            <span>范围下载</span>
+                        </button>
+                        <button type="button" class="btn btn-primary" @click="create(false)">
+                            <span>完整下载</span>
+                        </button>
+                    </div>
+                </div>
+                <div tabindex="0" aria-hidden="true" style="width: 0; height: 0; overflow: hidden; outline: none;"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-root" id="modal-setting">
+        <div class="modal-mask" :class="{'fade-enter fade-enter-active': modalList['modal-setting'].showing, 'fade-leave fade-leave-active': modalList['modal-setting'].closing}" v-if="modalList['modal-setting'].show"></div>
+        <div tabindex="-1" class="modal-wrap modal-centered" v-show="modalList['modal-setting'].show">
+            <div role="dialog" aria-modal="true" class="modal" :class="{'zoom-enter zoom-enter-active': modalList['modal-setting'].showing, 'zoom-leave zoom-leave-active': modalList['modal-setting'].closing}" v-show="modalList['modal-setting'].show" style="width: 520px;">
+                <div tabindex="0" aria-hidden="true" style="width: 0; height: 0; overflow: hidden; outline: none;"></div>
+                <div class="modal-content">
+                    <button type="button" class="modal-close" @click="closeModal('modal-setting')"><span
+                            class="modal-close-x"><span role="img" aria-label="close" class="icon icon-close modal-close-icon"><svg
+                            fill-rule="evenodd" viewBox="64 64 896 896" focusable="false" data-icon="close" width="1em"
+                            height="1em" fill="currentColor" aria-hidden="true"><path
+                            d="M799.86 166.31c.02 0 .04.02.08.06l57.69 57.7c.04.03.05.05.06.08a.12.12 0 010 .06c0 .03-.02.05-.06.09L569.93 512l287.7 287.7c.04.04.05.06.06.09a.12.12 0 010 .07c0 .02-.02.04-.06.08l-57.7 57.69c-.03.04-.05.05-.07.06a.12.12 0 01-.07 0c-.03 0-.05-.02-.09-.06L512 569.93l-287.7 287.7c-.04.04-.06.05-.09.06a.12.12 0 01-.07 0c-.02 0-.04-.02-.08-.06l-57.69-57.7c-.04-.03-.05-.05-.06-.07a.12.12 0 010-.07c0-.03.02-.05.06-.09L454.07 512l-287.7-287.7c-.04-.04-.05-.06-.06-.09a.12.12 0 010-.07c0-.02.02-.04.06-.08l57.7-57.69c.03-.04.05-.05.07-.06a.12.12 0 01.07 0c.03 0 .05.02.09.06L512 454.07l287.7-287.7c.04-.04.06-.05.09-.06a.12.12 0 01.07 0z"></path></svg></span></span>
+                    </button>
+                    <div class="modal-header">
+                        <div class="modal-title">全局设置</div>
+                    </div>
+                    <div class="modal-body">
+                        <div class="form-item">
+                            <div class="form-item-label">
+                                <label title="保存格式">保存格式</label>
+                            </div>
+                            <div class="form-item-control">
+                                <div class="radio-group radio-group-outline">
+                                    <label class="radio-button-wrapper" :class="{'radio-button-wrapper-checked': type === 'TS'}">
+                                        <span class="radio-button" :class="{'radio-button-checked': type}">
+                                            <input class="radio-button-input" type="radio" v-model="type" value="TS" checked="">
+                                            <span class="radio-button-inner"></span>
+                                        </span>
+                                        <span>TS</span>
+                                    </label>
+                                    <label class="radio-button-wrapper" :class="{'radio-button-wrapper-checked': type === 'MP4'}">
+                                        <span class="radio-button" :class="{'radio-button-checked': type}">
+                                            <input class="radio-button-input" type="radio" v-model="type" value="MP4">
+                                            <span class="radio-button-inner"></span>
+                                        </span>
+                                        <span>MP4</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-item" v-if="isSupperStreamWrite">
+                            <div class="form-item-label">
+                                <label title="边下边存">边下边存<span class="form-item-optional">（开启后可以解决大文件下载内存不足的问题）</span></label>
+                            </div>
+                            <div class="form-item-control">
+                                <div class="radio-group radio-group-outline">
+                                    <label class="radio-button-wrapper" :class="{'radio-button-wrapper-checked': stream === false}">
+                                        <span class="radio-button" :class="{'radio-button-checked': stream}">
+                                            <input class="radio-button-input" type="radio" v-model="stream" :value="false">
+                                            <span class="radio-button-inner"></span>
+                                        </span>
+                                        <span>否</span>
+                                    </label>
+                                    <label class="radio-button-wrapper" :class="{'radio-button-wrapper-checked': stream === true}">
+                                        <span class="radio-button" :class="{'radio-button-checked': stream}">
+                                            <input class="radio-button-input" type="radio" v-model="stream" :value="true">
+                                            <span class="radio-button-inner"></span>
+                                        </span>
+                                        <span>是</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-default" @click="closeModal('modal-setting')">
+                            <span>关 闭</span>
+                        </button>
+                    </div>
+                </div>
+                <div tabindex="0" aria-hidden="true" style="width: 0; height: 0; overflow: hidden; outline: none;"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-root" id="modal-help">
+        <div class="modal-mask" :class="{'fade-enter fade-enter-active': modalList['modal-help'].showing, 'fade-leave fade-leave-active': modalList['modal-help'].closing}" v-if="modalList['modal-help'].show"></div>
+        <div tabindex="-1" class="modal-wrap modal-centered" v-show="modalList['modal-help'].show">
+            <div role="dialog" aria-modal="true" class="modal" :class="{'zoom-enter zoom-enter-active': modalList['modal-help'].showing, 'zoom-leave zoom-leave-active': modalList['modal-help'].closing}" v-show="modalList['modal-help'].show" style="width: 800px;">
+                <div tabindex="0" aria-hidden="true" style="width: 0; height: 0; overflow: hidden; outline: none;"></div>
+                <div class="modal-content">
+                    <button type="button" class="modal-close" @click="closeModal('modal-help')"><span
+                            class="modal-close-x"><span role="img" aria-label="close" class="icon icon-close modal-close-icon"><svg
+                            fill-rule="evenodd" viewBox="64 64 896 896" focusable="false" data-icon="close" width="1em"
+                            height="1em" fill="currentColor" aria-hidden="true"><path
+                            d="M799.86 166.31c.02 0 .04.02.08.06l57.69 57.7c.04.03.05.05.06.08a.12.12 0 010 .06c0 .03-.02.05-.06.09L569.93 512l287.7 287.7c.04.04.05.06.06.09a.12.12 0 010 .07c0 .02-.02.04-.06.08l-57.7 57.69c-.03.04-.05.05-.07.06a.12.12 0 01-.07 0c-.03 0-.05-.02-.09-.06L512 569.93l-287.7 287.7c-.04.04-.06.05-.09.06a.12.12 0 01-.07 0c-.02 0-.04-.02-.08-.06l-57.69-57.7c-.04-.03-.05-.05-.06-.07a.12.12 0 010-.07c0-.03.02-.05.06-.09L454.07 512l-287.7-287.7c-.04-.04-.05-.06-.06-.09a.12.12 0 010-.07c0-.02.02-.04.06-.08l57.7-57.69c.03-.04.05-.05.07-.06a.12.12 0 01.07 0c.03 0 .05.02.09.06L512 454.07l287.7-287.7c.04-.04.06-.05.09-.06a.12.12 0 01.07 0z"></path></svg></span></span>
+                    </button>
+                    <div class="modal-header">
+                        <div class="modal-title">使用帮助</div>
+                    </div>
+                    <div class="modal-body">
+                        <div class="help-content">
+                            <h1>一、添加下载</h1>
+                            <p>首次下载，点击【新建下载】按钮，在弹出的窗口有几个选项：</p>
+                            <ul>
+                                <li><strong>M3U8地址：</strong>必填，请输入有效的<code>m3u8</code>链接。</li>
+                                <li><strong>保存标题：</strong>可选，如果<code>m3u8</code>地址中包含了<code>title</code>参数，则会自动以这个参数的值作为默认标题。</li>
+                                <li><strong>保存格式：</strong>默认保存为<code>TS</code>格式，如果下载后无法正常播放，可尝试保存为<code>MP4</code>格式。</li>
+                                <li><strong>边下边存：</strong>如果要下载的文件过大，会造成浏览器占用比较多的内存，这时可以考虑开启边下边存功能。</li>
+                            </ul>
+                            <p>底部有三个按钮【播放视频】【范围下载】【完整下载】</p>
+                            <ul>
+                                <li><strong>播放视频：</strong>可以无需下载视频，直接在线播放。</li>
+                                <li><strong>范围下载：</strong>如果想下载视频的某一段内容，可以使用该功能，点击后，输入起始片段和截止片段即可。</li>
+                                <li><strong>完整下载：</strong>完整的下载整个视频文件。</li>
+                            </ul>
+                            <div class="alert alert-info mb-8" role="alert">
+                                <div class="alert-content">
+                                    <div class="alert-message">
+                                        <strong>快捷下载：</strong>复制m3u8地址后，可以无需点击【新建下载】按钮，直接按<code>ctrl+v</code>，将地址粘贴到页面，即可快速添加下载任务。
+                                    </div>
+                                </div>
+                            </div>
+                            <h1>二、保存现有片段</h1>
+                            <p>当你添加任务后，页面会自动开始下载视频，你可以清晰直观地查看下载进度。如果任务未完成，你可以暂停任务，然后在任务地址上方会出现【保存现有片段】的按钮，点击该按钮可强制保存已经下载的片段。</p>
+                            <h1>三、失败重试</h1>
+                            <p>如果某个任务由于网络波动、服务器繁忙等原因下载失败，本工具会自动重试3次。如果3次都下载失败，将会暂停下载，然后继续下载其他视频。</p>
+                            <p>你也可以点击任务上方的【错误：数字】按钮，或者点击进度条，查看哪些数据块下载失败。直接点击红色的数据块，即可重新下载该数据块。</p>
+                            <h1>四、问题反馈</h1>
+                            <p>如果你在使用过程中发现任何问题，欢迎提交反馈，你可发送邮件到 <a href="mailto:getm3u8@163.com" class="has-text-danger">getm3u8@163.com</a>，或者在GitHub上提交 <a href="https://github.com/caiweiming/get-m3u8/issues" target="_blank">issue</a>。感兴趣的朋友也欢迎 <a href="https://github.com/caiweiming/get-m3u8">Fork</a> 或者 <a href="https://github.com/caiweiming/get-m3u8/pulls">共同完善</a> 本项目。</p>
+                            <h1>五、致谢</h1>
+                            <p>本工具为个人开源项目，核心代码来自【<a href="https://github.com/Momo707577045/m3u8-downloader" target="_blank">m3u8-downloader</a>】这个开源项目，感谢作者的开源精神。另外本项目也使用了其他开源项目，如：<a href="https://cn.vuejs.org/" target="_blank">vue</a>、<a href="https://dplayer.diygod.dev/" target="_blank">DPlayer</a>等，对这些开源项目表示感谢！</p>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-default" @click="closeModal('modal-help')">
+                            <span>关 闭</span>
+                        </button>
+                    </div>
+                </div>
+                <div tabindex="0" aria-hidden="true" style="width: 0; height: 0; overflow: hidden; outline: none;"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-root" id="modal-segment">
+        <div class="modal-mask" :class="{'fade-enter fade-enter-active': modalList['modal-segment'].showing, 'fade-leave fade-leave-active': modalList['modal-segment'].closing}" v-if="modalList['modal-segment'].show"></div>
+        <div tabindex="-1" class="modal-wrap modal-centered" @click.self="closeModal('modal-segment')" v-show="modalList['modal-segment'].show">
+            <div role="dialog" aria-modal="true" class="modal" :class="{'zoom-enter zoom-enter-active': modalList['modal-segment'].showing, 'zoom-leave zoom-leave-active': modalList['modal-segment'].closing}" v-show="modalList['modal-segment'].show">
+                <div tabindex="0" aria-hidden="true" style="width: 0; height: 0; overflow: hidden; outline: none;"></div>
+                <div class="modal-content">
+                    <button type="button" class="modal-close" @click="closeModal('modal-segment')"><span
+                            class="modal-close-x"><span role="img" aria-label="close" class="icon icon-close modal-close-icon"><svg
+                            fill-rule="evenodd" viewBox="64 64 896 896" focusable="false" data-icon="close" width="1em"
+                            height="1em" fill="currentColor" aria-hidden="true"><path
+                            d="M799.86 166.31c.02 0 .04.02.08.06l57.69 57.7c.04.03.05.05.06.08a.12.12 0 010 .06c0 .03-.02.05-.06.09L569.93 512l287.7 287.7c.04.04.05.06.06.09a.12.12 0 010 .07c0 .02-.02.04-.06.08l-57.7 57.69c-.03.04-.05.05-.07.06a.12.12 0 01-.07 0c-.03 0-.05-.02-.09-.06L512 569.93l-287.7 287.7c-.04.04-.06.05-.09.06a.12.12 0 01-.07 0c-.02 0-.04-.02-.08-.06l-57.69-57.7c-.04-.03-.05-.05-.06-.07a.12.12 0 010-.07c0-.03.02-.05.06-.09L454.07 512l-287.7-287.7c-.04-.04-.05-.06-.06-.09a.12.12 0 010-.07c0-.02.02-.04.06-.08l57.7-57.69c.03-.04.05-.05.07-.06a.12.12 0 01.07 0c.03 0 .05.02.09.06L512 454.07l287.7-287.7c.04-.04.06-.05.09-.06a.12.12 0 01.07 0z"></path></svg></span></span>
+                    </button>
+                    <div class="modal-header">
+                        <div class="modal-title">视频碎片</div>
+                    </div>
+                    <div class="modal-body">
+                        <div class="alert alert-warning mb-8" role="alert">
+                            <span role="img" class="icon icon-info-circle alert-icon">
+                                <svg viewBox="64 64 896 896" focusable="false" data-icon="info-circle" width="1em"
+                                height="1em" fill="currentColor" aria-hidden="true"><path
+                                d="M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64zm32 664c0 4.4-3.6 8-8 8h-48c-4.4 0-8-3.6-8-8V456c0-4.4 3.6-8 8-8h48c4.4 0 8 3.6 8 8v272zm-32-344a48.01 48.01 0 010-96 48.01 48.01 0 010 96z"></path>
+                                </svg>
+                            </span>
+                            <div class="alert-content">
+                                <div class="alert-message">若某视频碎片下载发生错误，将标记为红色，可点击相应图标进行重试。</div>
+                            </div>
+                        </div>
+                        <div class="alert alert-info mb-8" role="alert">
+                            <span role="img" class="icon icon-info-circle alert-icon">
+                                <svg viewBox="64 64 896 896" focusable="false" data-icon="info-circle" width="1em"
+                                height="1em" fill="currentColor" aria-hidden="true"><path
+                                d="M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64zm32 664c0 4.4-3.6 8-8 8h-48c-4.4 0-8-3.6-8-8V456c0-4.4 3.6-8 8-8h48c4.4 0 8 3.6 8 8v272zm-32-344a48.01 48.01 0 010-96 48.01 48.01 0 010 96z"></path>
+                                </svg>
+                            </span>
+                            <div class="alert-content">
+                                <div class="alert-message">
+                                    碎片总量：{{ segment.rangeDownload && segment.rangeDownload.targetSegment }}，已下载：{{ segment.finishNum }}，错误：{{ segment.errorNum }}，进度：{{ getProgress(segment) }}%
+                                </div>
+                            </div>
+                        </div>
+                        <div class="segments">
+                            <span class="segment" v-for="(item, index) in segment.finishList" :key="index" :class="[item.status]" :title="item.title" @click="retry(index)">{{ index + 1 }}</span>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-default" @click="closeModal('modal-segment')">
+                            <span>关 闭</span>
+                        </button>
+                    </div>
+                </div>
+                <div tabindex="0" aria-hidden="true" style="width: 0; height: 0; overflow: hidden; outline: none;"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-root" id="modal-range">
+        <div class="modal-mask" :class="{'fade-enter fade-enter-active': modalList['modal-range'].showing, 'fade-leave fade-leave-active': modalList['modal-range'].closing}" v-if="modalList['modal-range'].show"></div>
+        <div tabindex="-1" class="modal-wrap modal-centered" v-show="modalList['modal-range'].show">
+            <div role="dialog" aria-modal="true" class="modal" :class="{'zoom-enter zoom-enter-active': modalList['modal-range'].showing, 'zoom-leave zoom-leave-active': modalList['modal-range'].closing}" v-show="modalList['modal-range'].show" style="width: 520px;">
+                <div tabindex="0" aria-hidden="true" style="width: 0; height: 0; overflow: hidden; outline: none;"></div>
+                <div class="modal-content">
+                    <button type="button" class="modal-close" @click="closeModal('modal-range')"><span
+                            class="modal-close-x"><span role="img" aria-label="close" class="icon icon-close modal-close-icon"><svg
+                            fill-rule="evenodd" viewBox="64 64 896 896" focusable="false" data-icon="close" width="1em"
+                            height="1em" fill="currentColor" aria-hidden="true"><path
+                            d="M799.86 166.31c.02 0 .04.02.08.06l57.69 57.7c.04.03.05.05.06.08a.12.12 0 010 .06c0 .03-.02.05-.06.09L569.93 512l287.7 287.7c.04.04.05.06.06.09a.12.12 0 010 .07c0 .02-.02.04-.06.08l-57.7 57.69c-.03.04-.05.05-.07.06a.12.12 0 01-.07 0c-.03 0-.05-.02-.09-.06L512 569.93l-287.7 287.7c-.04.04-.06.05-.09.06a.12.12 0 01-.07 0c-.02 0-.04-.02-.08-.06l-57.69-57.7c-.04-.03-.05-.05-.06-.07a.12.12 0 010-.07c0-.03.02-.05.06-.09L454.07 512l-287.7-287.7c-.04-.04-.05-.06-.06-.09a.12.12 0 010-.07c0-.02.02-.04.06-.08l57.7-57.69c.03-.04.05-.05.07-.06a.12.12 0 01.07 0c.03 0 .05.02.09.06L512 454.07l287.7-287.7c.04-.04.06-.05.09-.06a.12.12 0 01.07 0z"></path></svg></span></span>
+                    </button>
+                    <div class="modal-header">
+                        <div class="modal-title">范围下载</div>
+                    </div>
+                    <div class="modal-body">
+                        <div class="form-item">
+                            <div class="form-item-label">
+                                <label title="片段范围">请选择片段范围</label>
+                            </div>
+                            <div class="form-item-control">
+                                <div class="range">
+                                    <div class="range-input">
+                                        <input type="number" min="1" class="form-control" v-model="rangeDownload.startSegment" placeholder="起始片段">
+                                    </div>
+                                    <div class="range-separator">
+                                        <span aria-label="to" class="separator">
+                                            <span class="icon icon-swap-right">
+                                                <svg viewBox="0 0 1024 1024" focusable="false" data-icon="swap-right"
+                                                width="1em" height="1em" fill="currentColor" aria-hidden="true"><path
+                                                d="M873.1 596.2l-164-208A32 32 0 00684 376h-64.8c-6.7 0-10.4 7.7-6.3 13l144.3 183H152c-4.4 0-8 3.6-8 8v60c0 4.4 3.6 8 8 8h695.9c26.8 0 41.7-30.8 25.2-51.8z"></path></svg>
+                                            </span>
+                                        </span>
+                                    </div>
+                                    <div class="range-input">
+                                        <input type="number" min="1" class="form-control" v-model="rangeDownload.endSegment" placeholder="截止片段">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-default" @click="closeModal('modal-range')">
+                            <span>取 消</span>
+                        </button>
+                        <button type="button" class="btn btn-primary" @click="getRange">
+                            <span>确 定</span>
+                        </button>
+                    </div>
+                </div>
+                <div tabindex="0" aria-hidden="true" style="width: 0; height: 0; overflow: hidden; outline: none;"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-root" id="modal-player">
+        <div class="modal-mask" :class="{'fade-enter fade-enter-active': modalList['modal-player'].showing, 'fade-leave fade-leave-active': modalList['modal-player'].closing}" v-if="modalList['modal-player'].show"></div>
+        <div tabindex="-1" class="modal-wrap modal-centered" v-show="modalList['modal-player'].show">
+            <div role="dialog" aria-modal="true" class="modal" :class="{'zoom-enter zoom-enter-active': modalList['modal-player'].showing, 'zoom-leave zoom-leave-active': modalList['modal-player'].closing}" v-show="modalList['modal-player'].show" style="min-width: 520px">
+                <div tabindex="0" aria-hidden="true" style="width: 0; height: 0; overflow: hidden; outline: none;"></div>
+                <div class="modal-content">
+                    <button type="button" class="modal-close" @click="closePlayer"><span
+                            class="modal-close-x"><span role="img" aria-label="close" class="icon icon-close modal-close-icon"><svg
+                            fill-rule="evenodd" viewBox="64 64 896 896" focusable="false" data-icon="close" width="1em"
+                            height="1em" fill="currentColor" aria-hidden="true"><path
+                            d="M799.86 166.31c.02 0 .04.02.08.06l57.69 57.7c.04.03.05.05.06.08a.12.12 0 010 .06c0 .03-.02.05-.06.09L569.93 512l287.7 287.7c.04.04.05.06.06.09a.12.12 0 010 .07c0 .02-.02.04-.06.08l-57.7 57.69c-.03.04-.05.05-.07.06a.12.12 0 01-.07 0c-.03 0-.05-.02-.09-.06L512 569.93l-287.7 287.7c-.04.04-.06.05-.09.06a.12.12 0 01-.07 0c-.02 0-.04-.02-.08-.06l-57.69-57.7c-.04-.03-.05-.05-.06-.07a.12.12 0 010-.07c0-.03.02-.05.06-.09L454.07 512l-287.7-287.7c-.04-.04-.05-.06-.06-.09a.12.12 0 010-.07c0-.02.02-.04.06-.08l57.7-57.69c.03-.04.05-.05.07-.06a.12.12 0 01.07 0c.03 0 .05.02.09.06L512 454.07l287.7-287.7c.04-.04.06-.05.09-.06a.12.12 0 01.07 0z"></path></svg></span></span>
+                    </button>
+                    <div class="modal-header">
+                        <div class="modal-title">视频播放</div>
+                    </div>
+                    <div class="modal-body">
+                        <div id="player" style="width: auto;height: 400px;"></div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-default" @click="closePlayer">
+                            <span>关 闭</span>
+                        </button>
+                    </div>
+                </div>
+                <div tabindex="0" aria-hidden="true" style="width: 0; height: 0; overflow: hidden; outline: none;"></div>
+            </div>
+        </div>
+    </div>
+</div>
+<script src="/static/js/vue.global.prod.js"></script>
+<script src="/static/js/aes-decrypt.js"></script>
+<script src="/static/js/mux-mp4.js"></script>
+<script src="/static/js/StreamSaver.js"></script>
+<script src="/static/js/hls/hls.min.js"></script>
+<script src="/static/js/dplayer/DPlayer.min.js"></script>
+<script src="/static/js/main.js"></script>
+</body>
+</html>
