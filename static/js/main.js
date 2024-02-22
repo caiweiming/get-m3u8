@@ -147,6 +147,19 @@ Vue.createApp({
                 return;
             }
 
+            // 判断targetUrl中是否包含_ignore参数
+            if (targetUrl.searchParams.has('_ignore')) {
+                let ignores = targetUrl.searchParams.get('_ignore');
+                ignores = ignores.split(',');
+                // 将匹配到的ignore参数从url中去除掉
+                targetUrl.searchParams.delete('_ignore');
+                // 循环ignores中的每个参数，并且从url中去掉
+                ignores.forEach((ignore) => {
+                    targetUrl.searchParams.delete(ignore);
+                })
+                this.url = targetUrl.href;
+            }
+
             // 开始时间
             this.beginTime = new Date();
 
