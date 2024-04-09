@@ -13,6 +13,17 @@
 
 ## 预览
 
+### 首页
+![image](https://raw.githubusercontent.com/caiweiming/get-m3u8/main/preview/1.png)
+### 新建
+![image](https://raw.githubusercontent.com/caiweiming/get-m3u8/main/preview/2.png)
+### 下载
+![image](https://raw.githubusercontent.com/caiweiming/get-m3u8/main/preview/3.png)
+### 播放
+![image](https://raw.githubusercontent.com/caiweiming/get-m3u8/main/preview/4.png)
+### 碎片
+![image](https://raw.githubusercontent.com/caiweiming/get-m3u8/main/preview/5.png)
+
 ## 部署
 
 本项目可以直接下载后用浏览器打开使用，也可以将本项目部署到自己的服务器上，这样就可以在手机上访问了。
