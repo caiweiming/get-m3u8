@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="favicon-title">
+    <title id="favicon-title">GetM3U8 favicon</title>
+    <rect width="64" height="64" rx="14" fill="#26282b"/>
+    <path
+        data-part="download-arrow"
+        d="M32 13v25m0 0 10-10m-10 10L22 28"
+        fill="none"
+        stroke="#ffffff"
+        stroke-width="5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+    />
+    <path
+        d="M19 43h26"
+        fill="none"
+        stroke="#ffffff"
+        stroke-width="5"
+        stroke-linecap="round"
+    />
+    <rect data-part="segment-block" x="17" y="49" width="8" height="5" rx="2" fill="#ffffff" opacity="0.9"/>
+    <rect data-part="segment-block" x="28" y="49" width="8" height="5" rx="2" fill="#ffffff" opacity="0.72"/>
+    <rect data-part="segment-block" x="39" y="49" width="8" height="5" rx="2" fill="#ffffff" opacity="0.54"/>
+</svg>

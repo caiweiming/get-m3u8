@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>M3U8下载</title>
+    <meta name="description" content="M3U8下载是纯浏览器 HLS 下载与播放工具，支持 m3u8 在线预览播放、AES-128 解密、分片下载、TS 保存、MP4 导出、范围下载和任务恢复。">
+    <meta name="keywords" content="m3u8下载,m3u8播放器,m3u8在线播放,HLS下载,HLS播放器,AES-128,TS,MP4,视频分片下载,m3u8 downloader">
+    <meta name="author" content="getm3u8.com">
+    <meta name="robots" content="index, follow">
+    <meta name="theme-color" content="#26282b">
+    <link rel="canonical" href="https://getm3u8.com/">
+    <meta property="og:title" content="M3U8下载">
+    <meta property="og:description" content="纯浏览器 m3u8 / HLS 下载与播放工具，支持在线预览播放、AES-128、TS/MP4、范围下载、分片状态和任务恢复。">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://getm3u8.com/">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="M3U8下载">
+    <meta name="twitter:description" content="纯浏览器 m3u8 / HLS 下载与播放工具，支持在线播放、分片下载、解密、保存和恢复。">
+    <link rel="icon" href="favicon.svg?v=202606281858" type="image/svg+xml">
+    <link rel="stylesheet" href="style.css?v=202606281858">
+    <!-- Lucide Icons (local vendor bundle) -->
+    <script src="vendor/lucide.min.js?v=202606281858"></script>
+    <!-- HLS preview runtime (local vendor bundle) -->
+    <script src="vendor/hls.min.js?v=202606281858"></script>
+    <!-- TS to MP4 transmux runtime (local vendor bundle) -->
+    <script src="vendor/mux.min.js?v=202606281858"></script>
+    <!-- StreamSaver fallback runtime (local vendor bundle) -->
+    <script src="vendor/streamsaver.js?v=202606281858"></script>
+</head>
+<body>
+    <div id="app-loader" class="app-loader" aria-hidden="true"></div>
+    <div id="app">
+        <header class="app-header">
+            <div class="header-content">
+                <a id="site-logo-link" class="logo" href="./" aria-label="返回首页">
+                    <i data-lucide="download" class="logo-icon"></i>
+                    <h1>M3U8下载</h1>
+                </a>
+                <div class="header-actions">
+                    <button id="theme-toggle-btn" class="icon-btn" data-tooltip="切换主题" aria-label="切换主题">
+                        <i data-lucide="sun"></i>
+                    </button>
+                    <button id="settings-btn" class="icon-btn" data-tooltip="设置" aria-label="设置">
+                        <i data-lucide="settings"></i>
+                    </button>
+                    <button id="help-btn" class="icon-btn" data-tooltip="帮助" aria-label="帮助">
+                        <i data-lucide="help-circle"></i>
+                    </button>
+                    <a href="https://github.com/caiweiming/get-m3u8" target="_blank" rel="noopener noreferrer" class="icon-btn" data-tooltip="GitHub" aria-label="GitHub">
+                        <i data-lucide="github"></i>
+                    </a>
+                </div>
+            </div>
+        </header>
+
+        <main class="app-main">
+            <!-- Hero Section (Default State) -->
+            <section id="hero-section" class="hero-section">
+                <div class="hero-actions-group">
+                    <button id="hero-new-download-btn" class="black-btn">
+                        <i data-lucide="plus"></i>
+                        <span>新建下载</span>
+                    </button>
+                    <p class="hero-hint">新建下载 / 粘贴链接</p>
+                </div>
+            </section>
+
+            <!-- Task List Section (Hidden when empty) -->
+            <section id="tasks-section" class="tasks-section hidden">
+                <div class="section-header task-list-header">
+                    <div class="task-list-header__title">
+                        <h2>当前任务</h2>
+                    </div>
+                    <div class="task-list-toolbar">
+                        <div class="task-list-toolbar__selection">
+                            <label class="task-list-toolbar__checkbox" for="task-list-select-all-toggle">
+                                <input id="task-list-select-all-toggle" type="checkbox">
+                                <span>全选</span>
+                            </label>
+                            <div class="task-list-toolbar__batch">
+                                <span id="task-list-selected-count" class="task-list-toolbar__count">已选 0 项</span>
+                                <button id="task-list-batch-start-btn" type="button" class="task-list-toolbar__batch-btn" disabled>开始</button>
+                                <button id="task-list-batch-pause-btn" type="button" class="task-list-toolbar__batch-btn" disabled>暂停</button>
+                                <button id="task-list-batch-delete-btn" type="button" class="task-list-toolbar__batch-btn task-list-batch-delete-btn" disabled>删除</button>
+                            </div>
+                            <div class="task-list-toolbar__filters" aria-label="任务筛选">
+                                <label class="task-list-toolbar__filter" for="task-filter-status">
+                                    <select id="task-filter-status">
+                                        <option value="all">全部状态</option>
+                                        <option value="downloading">下载中</option>
+                                        <option value="paused">已暂停</option>
+                                        <option value="failed">下载失败</option>
+                                        <option value="completed">已完成</option>
+                                        <option value="recoverable">可继续</option>
+                                    </select>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="task-list-toolbar__create">
+                            <button id="task-list-new-download-btn" type="button" class="black-btn black-btn--compact">
+                                <i data-lucide="plus"></i>
+                                <span>新建下载</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div id="task-cache-status-bar" class="task-cache-status-bar" aria-label="本地缓存状态">
+                    <div class="task-cache-status-bar__main">
+                        <span class="task-cache-status-bar__label">本地缓存</span>
+                        <span id="segment-cache-availability" class="task-cache-status-bar__pill">检测中</span>
+                        <span>可恢复 <strong id="segment-cache-records">--</strong> 分片</span>
+                        <span>占用 <strong id="segment-cache-bytes">--</strong></span>
+                        <span>浏览器存储 <strong id="segment-cache-storage">--</strong></span>
+                        <span>用于断点续传，完成任务会自动清理</span>
+                    </div>
+                    <div class="task-cache-status-bar__actions">
+                        <button type="button" id="segment-cache-clean-orphans-btn" class="secondary-btn">清理无效</button>
+                        <button type="button" id="segment-cache-clear-btn" class="danger-btn">清空缓存</button>
+                    </div>
+                </div>
+                <div id="task-list" class="task-list"></div>
+            </section>
+        </main>
+
+        <footer class="app-footer">
+            <p>© 2026 M3U8下载. All rights reserved.</p>
+        </footer>
+
+        <!-- Modals -->
+        <div id="modal-overlay" class="modal-overlay" aria-hidden="true">
+            <!-- New Download Modal -->
+            <div id="new-task-modal" class="modal modal-panel" data-modal="new-task" aria-hidden="true">
+                <div class="modal-header">
+                    <h3>新建下载任务</h3>
+                    <button class="close-modal-btn modal-close-btn"><i data-lucide="x"></i></button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-item">
+                        <label for="new-url">m3u8 地址</label>
+                        <input type="text" id="new-url" placeholder="https://...">
+                        <p id="new-url-error" class="form-error hidden">请输入 m3u8 地址</p>
+                    </div>
+                    <div class="form-item">
+                        <label for="new-title">保存标题</label>
+                        <input type="text" id="new-title" placeholder="可选：自定义标题">
+                    </div>
+                    <div class="form-item">
+                        <label>下载范围</label>
+                        <div class="form-choice-group" role="radiogroup" aria-label="下载范围">
+                            <label class="form-choice" for="new-range-mode-all">
+                                <input type="radio" id="new-range-mode-all" name="new-range-mode" value="all" checked>
+                                <span class="form-choice-indicator" aria-hidden="true"></span>
+                                <span>全部下载</span>
+                            </label>
+                            <label class="form-choice" for="new-range-mode-custom">
+                                <input type="radio" id="new-range-mode-custom" name="new-range-mode" value="custom">
+                                <span class="form-choice-indicator" aria-hidden="true"></span>
+                                <span>指定区间</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-item">
+                        <label>保存格式</label>
+                        <div class="form-choice-group" role="radiogroup" aria-label="保存格式">
+                            <label class="form-choice" for="new-format-ts">
+                                <input type="radio" id="new-format-ts" name="new-format" value="ts" checked>
+                                <span class="form-choice-indicator" aria-hidden="true"></span>
+                                <span>TS</span>
+                            </label>
+                            <label class="form-choice" for="new-format-mp4">
+                                <input type="radio" id="new-format-mp4" name="new-format" value="mp4">
+                                <span class="form-choice-indicator" aria-hidden="true"></span>
+                                <span>MP4</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-item">
+                        <label for="new-stream-save">保存模式</label>
+                        <label class="form-checkbox" for="new-stream-save">
+                            <input type="checkbox" id="new-stream-save">
+                            <span>边下边存</span>
+                        </label>
+                        <p class="form-help">开启后会在下载过程中尽量直接写入文件，减少一次性内存占用；浏览器不支持时会自动降级。</p>
+                    </div>
+                    <div class="form-item">
+                        <label for="new-concurrency">并发数</label>
+                        <input type="number" id="new-concurrency" value="4" min="1" max="8">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="secondary-btn close-modal-btn">取消</button>
+                    <button id="preview-new-download-btn" class="secondary-btn">预览</button>
+                    <button id="confirm-new-download-btn" class="primary-btn">
+                        <span id="confirm-new-download-spinner" class="button-inline-spinner hidden" aria-hidden="true"></span>
+                        <span id="confirm-new-download-label">开始下载</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Download Quality Modal -->
+            <div id="download-quality-modal" class="modal modal-panel" data-modal="download-quality" aria-hidden="true">
+                <div class="modal-header">
+                    <h3 id="download-quality-task-title">下载选项</h3>
+                    <button class="close-modal-btn modal-close-btn" aria-label="关闭清晰度选择"><i data-lucide="x"></i></button>
+                </div>
+                <div class="modal-body">
+                    <div id="download-option-tabs" class="download-option-tabs" role="tablist" aria-label="下载选项">
+                        <button class="download-option-tab is-active" type="button" role="tab" aria-selected="true" data-download-option-tab="quality" data-download-option-panel="download-quality-panel">分辨率</button>
+                        <button class="download-option-tab hidden" type="button" role="tab" aria-selected="false" data-download-option-tab="audio" data-download-option-panel="download-audio-rendition-panel">音轨</button>
+                        <button class="download-option-tab hidden" type="button" role="tab" aria-selected="false" data-download-option-tab="subtitle" data-download-option-panel="download-subtitle-rendition-panel">字幕</button>
+                    </div>
+                    <section id="download-quality-panel" class="download-option-panel" data-download-option-panel="quality">
+                        <p id="download-quality-empty" class="form-note hidden">暂无可选清晰度，请返回检查播放列表内容。</p>
+                        <div id="download-quality-list" class="download-quality-list" role="radiogroup" aria-label="下载清晰度列表">
+                            <label class="download-quality-option" for="download-quality-option-default">
+                                <input type="radio" id="download-quality-option-default" name="download-quality-option" value="default">
+                                <span class="form-choice-indicator" aria-hidden="true"></span>
+                                <span class="download-quality-option__content">
+                                    <span class="download-quality-option__title">默认清晰度</span>
+                                    <span class="download-quality-option__meta">等待加载码率、分辨率与分段信息</span>
+                                </span>
+                                <span class="download-quality-option__badge">推荐</span>
+                            </label>
+                        </div>
+                    </section>
+                    <section id="download-audio-rendition-panel" class="download-option-panel hidden" data-download-option-panel="audio">
+                        <section id="download-audio-rendition-section" class="download-rendition-section hidden">
+                            <h4>音轨</h4>
+                            <div id="download-audio-rendition-list" class="download-rendition-list" role="radiogroup" aria-label="下载音轨列表"></div>
+                        </section>
+                    </section>
+                    <section id="download-subtitle-rendition-panel" class="download-option-panel hidden" data-download-option-panel="subtitle">
+                        <section id="download-subtitle-rendition-section" class="download-rendition-section hidden">
+                            <h4>字幕</h4>
+                            <div id="download-subtitle-rendition-list" class="download-rendition-list" role="radiogroup" aria-label="下载字幕列表"></div>
+                        </section>
+                    </section>
+                    <p id="download-rendition-output-hint" class="download-rendition-output-hint hidden">已选择外部音轨或字幕，将分别保存多个文件；直接打开视频可能无声，需要手动加载音轨或合并后播放。</p>
+                </div>
+                <div class="modal-footer">
+                    <button class="secondary-btn close-modal-btn">取消</button>
+                    <button id="confirm-download-quality-btn" class="primary-btn">确认下载</button>
+                </div>
+            </div>
+
+            <!-- Download Range Modal -->
+            <div id="download-range-modal" class="modal modal-panel" data-modal="download-range" aria-hidden="true">
+                <div class="modal-header">
+                    <h3>确认下载范围</h3>
+                    <button class="close-modal-btn modal-close-btn" aria-label="关闭下载范围确认"><i data-lucide="x"></i></button>
+                </div>
+                <div class="modal-body">
+                    <div class="download-range-summary">
+                        <p class="download-range-summary__eyebrow">范围下载</p>
+                        <h4 id="download-range-task-title" class="download-range-summary__title">确认下载范围</h4>
+                        <p class="download-range-summary__meta">当前媒体共 <strong id="download-range-total-count">0</strong> 个视频碎片，请确认实际下载区间。</p>
+                    </div>
+                    <div class="download-range-fields">
+                        <div class="form-item">
+                            <label for="download-range-start-input">起始片号</label>
+                            <input type="number" id="download-range-start-input" min="1" inputmode="numeric" placeholder="例如 1">
+                        </div>
+                        <div class="form-item">
+                            <label for="download-range-end-input">结束片号</label>
+                            <input type="number" id="download-range-end-input" min="1" inputmode="numeric" placeholder="例如 120">
+                        </div>
+                    </div>
+                    <p class="form-help">可输入 `1` 到总片数之间的片号，确认后仅下载该区间内的碎片。</p>
+                    <p class="download-range-preview">预计下载 <strong id="download-range-preview-count">--</strong> 个碎片</p>
+                    <p id="download-range-error" class="form-error hidden">请输入有效的下载范围</p>
+                </div>
+                <div class="modal-footer">
+                    <button class="secondary-btn close-modal-btn">取消</button>
+                    <button id="confirm-download-range-btn" class="primary-btn">确认范围</button>
+                </div>
+            </div>
+
+            <!-- Force Merge Modal -->
+            <div id="force-merge-modal" class="modal modal-panel" data-modal="force-merge" aria-hidden="true">
+                <div class="modal-header">
+                    <h3>强制合并</h3>
+                    <button class="close-modal-btn modal-close-btn" aria-label="关闭强制合并"><i data-lucide="x"></i></button>
+                </div>
+                <div class="modal-body">
+                    <div class="force-merge-summary">
+                        <p class="force-merge-summary__eyebrow">部分导出</p>
+                        <h4 id="force-merge-task-title" class="force-merge-summary__title">选择合并方式</h4>
+                        <p id="force-merge-task-meta" class="force-merge-summary__meta">将只使用当前已下载成功的视频碎片。</p>
+                    </div>
+                    <div id="force-merge-mode-list" class="force-merge-mode-list" role="radiogroup" aria-label="强制合并方式">
+                        <label class="force-merge-option" for="force-merge-mode-prefix">
+                            <input type="radio" id="force-merge-mode-prefix" name="force-merge-mode" value="prefix" checked>
+                            <span class="form-choice-indicator" aria-hidden="true"></span>
+                            <span class="force-merge-option__content">
+                                <span class="force-merge-option__title">连续合并</span>
+                                <span class="force-merge-option__meta">从当前范围起点开始，只导出连续成功的碎片。</span>
+                            </span>
+                            <span class="force-merge-option__badge">推荐</span>
+                        </label>
+                        <label class="force-merge-option" for="force-merge-mode-discrete">
+                            <input type="radio" id="force-merge-mode-discrete" name="force-merge-mode" value="discrete">
+                            <span class="form-choice-indicator" aria-hidden="true"></span>
+                            <span class="force-merge-option__content">
+                                <span class="force-merge-option__title">离散硬拼</span>
+                                <span class="force-merge-option__meta">实验性：会跳过缺失碎片，可能出现跳播、卡顿、黑屏或音画异常。</span>
+                            </span>
+                            <span class="force-merge-option__badge">实验性</span>
+                        </label>
+                    </div>
+                    <p id="force-merge-warning" class="form-note hidden">离散硬拼仅支持 TS。</p>
+                </div>
+                <div class="modal-footer">
+                    <button class="secondary-btn close-modal-btn">取消</button>
+                    <button id="confirm-force-merge-btn" class="primary-btn">开始合并</button>
+                </div>
+            </div>
+
+            <!-- Confirm Delete Modal -->
+            <div id="confirm-delete-modal" class="modal modal-panel confirm-delete-modal" data-modal="confirm-delete" aria-hidden="true">
+                <div class="modal-header">
+                    <h3 id="confirm-delete-title">确认删除</h3>
+                    <button class="close-modal-btn modal-close-btn" aria-label="关闭删除确认"><i data-lucide="x"></i></button>
+                </div>
+                <div class="modal-body">
+                    <div class="confirm-delete-content">
+                        <span class="confirm-delete-content__icon" aria-hidden="true"><i data-lucide="trash-2"></i></span>
+                        <div class="confirm-delete-content__copy">
+                            <p id="confirm-delete-message" class="confirm-delete-content__message">确认删除所选任务？</p>
+                            <p id="confirm-delete-hint" class="confirm-delete-content__hint">删除后不会保留任务记录，正在进行的请求会被立即中止。</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="secondary-btn close-modal-btn">取消</button>
+                    <button id="confirm-delete-btn" class="danger-btn">确认删除</button>
+                </div>
+            </div>
+
+            <!-- Preview Modal -->
+            <div id="preview-modal" class="modal modal-panel large preview-modal" data-modal="preview" aria-hidden="true">
+                <div class="modal-header">
+                    <h3 id="preview-title">视频预览</h3>
+                    <button class="close-modal-btn modal-close-btn" aria-label="关闭预览"><i data-lucide="x"></i></button>
+                </div>
+                <div class="modal-body">
+                    <div class="preview-content-layout">
+                        <div class="preview-player-shell">
+                            <video id="preview-video" class="preview-video" controls playsinline preload="metadata"></video>
+                            <div id="preview-subtitle-overlay" class="preview-subtitle-overlay hidden" aria-live="polite"></div>
+                            <p id="preview-status" class="preview-status">准备预览...</p>
+                        </div>
+                        <div class="preview-options-rail">
+                            <div id="preview-option-tabs" class="preview-option-tabs hidden" role="tablist" aria-label="预览选项">
+                                <div class="preview-option-tab is-active" role="tab" tabindex="0" aria-selected="true" data-preview-option-tab="quality" data-preview-option-panel="preview-quality-panel">分辨率</div>
+                                <div class="preview-option-tab" role="tab" tabindex="0" aria-selected="false" data-preview-option-tab="subtitle" data-preview-option-panel="preview-subtitle-panel">字幕</div>
+                            </div>
+                            <div id="preview-quality-panel" class="preview-quality-panel preview-option-panel hidden" data-preview-option-panel="quality">
+                                <div id="preview-quality-list" class="download-quality-list" role="radiogroup" aria-label="预览清晰度列表"></div>
+                            </div>
+                            <div id="preview-subtitle-panel" class="preview-quality-panel preview-option-panel hidden" data-preview-option-panel="subtitle">
+                                <div id="preview-subtitle-list" class="download-quality-list" role="radiogroup" aria-label="预览字幕列表"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Settings Modal -->
+            <div id="settings-modal" class="modal modal-panel" data-modal="settings" aria-hidden="true">
+                <div class="modal-header">
+                    <h3>设置</h3>
+                    <button class="close-modal-btn modal-close-btn"><i data-lucide="x"></i></button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-item">
+                        <label for="setting-title-tpl">保存标题模板</label>
+                        <input type="text" id="setting-title-tpl" placeholder="video-{id}">
+                    </div>
+                    <div class="form-item">
+                        <label for="setting-stream-save">保存模式</label>
+                        <label class="form-checkbox" for="setting-stream-save">
+                            <input type="checkbox" id="setting-stream-save">
+                            <span>边下边存</span>
+                        </label>
+                        <p class="form-help">作为默认偏好，新建任务时会自动带入；浏览器不支持时会自动降级。</p>
+                    </div>
+                    <div class="form-item">
+                        <label for="setting-segment-cache">断点续传缓存</label>
+                        <label class="form-checkbox" for="setting-segment-cache">
+                            <input type="checkbox" id="setting-segment-cache" checked>
+                            <span>启用 IndexedDB 分片缓存</span>
+                        </label>
+                        <p class="form-help">开启后可在刷新页面后继续未完成下载；完成任务会自动清理对应缓存，关闭后可减少浏览器存储占用。</p>
+                    </div>
+                    <div class="form-item">
+                        <label for="setting-format">保存格式</label>
+                        <select id="setting-format">
+                            <option value="ts">TS</option>
+                            <option value="mp4">MP4</option>
+                        </select>
+                    </div>
+                    <div class="form-item">
+                        <label for="setting-concurrency">默认并发数</label>
+                        <input type="number" id="setting-concurrency" value="4" min="1" max="8">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="secondary-btn close-modal-btn">取消</button>
+                    <button id="save-settings-btn" class="primary-btn">保存</button>
+                </div>
+            </div>
+
+            <!-- Help Modal -->
+            <div id="help-modal" class="modal modal-panel help-modal" data-modal="help" aria-hidden="true">
+                <div class="modal-header">
+                    <h3>帮助</h3>
+                    <button class="close-modal-btn modal-close-btn" aria-label="关闭帮助"><i data-lucide="x"></i></button>
+                </div>
+                <div class="modal-body">
+                    <div class="help-modal__intro">
+                        <p>这里汇总常用下载流程和任务操作。所有下载都在本地浏览器中完成，遇到源站跨域或鉴权限制时，可能需要更换链接或重新获取有效地址。</p>
+                    </div>
+                    <div class="help-modal__grid">
+                        <section class="help-modal__section">
+                            <h4><i data-lucide="rocket" aria-hidden="true"></i>快速开始</h4>
+                            <ol>
+                                <li>点击“新建下载”，粘贴 m3u8 地址。</li>
+                                <li>按需填写保存标题、保存格式、下载范围和并发数。</li>
+                                <li>点击“开始下载”，如存在多个清晰度，先选择分辨率。</li>
+                                <li>如果源提供多轨媒体，可选择可用的外部音轨和 WebVTT 字幕。</li>
+                                <li>下载完成后，浏览器会保存对应的视频文件。</li>
+                            </ol>
+                        </section>
+                        <section class="help-modal__section">
+                            <h4><i data-lucide="list-checks" aria-hidden="true"></i>任务操作</h4>
+                            <ul>
+                                <li>下载按钮用于开始或重新下载可恢复任务。</li>
+                                <li>暂停会中止当前网络请求，再次点击可继续未完成分片。</li>
+                                <li>播放可打开预览窗口，删除会先弹出确认。</li>
+                                <li>勾选任务后，可使用顶部批量开始、暂停、删除。</li>
+                            </ul>
+                        </section>
+                        <section class="help-modal__section">
+                            <h4><i data-lucide="sliders-horizontal" aria-hidden="true"></i>高级能力</h4>
+                            <ul>
+                                <li>范围下载会在解析出真实分片后确认起止片号。</li>
+                                <li>边下边存可降低内存占用，但不支持强制合并。</li>
+                                <li>本地缓存用于刷新后恢复已下载分片，可在任务列表上方管理。</li>
+                                <li>独立音轨、字幕会分别保存为独立文件；直接打开视频可能无声，需要手动加载音轨或合并后播放。</li>
+                                <li>点击任务进度条可查看分片状态，失败分片可点击重试。</li>
+                            </ul>
+                        </section>
+                        <section class="help-modal__section">
+                            <h4><i data-lucide="link" aria-hidden="true"></i>快捷下载 URL 参数</h4>
+                            <ul>
+                                <li><code>source</code>：m3u8 地址，推荐 URL 编码。</li>
+                                <li><code>title</code>：预填保存标题。</li>
+                                <li><code>format</code>：<code>ts</code> 或 <code>mp4</code>。</li>
+                                <li><code>streamSave</code>：<code>1</code>/<code>true</code> 开启边下边存。</li>
+                                <li><code>range</code>：<code>all</code> 或 <code>custom</code>。</li>
+                                <li><code>concurrency</code>：分片并发数，范围 1-8。</li>
+                                <li><code>_ignore</code>：从 source 内部移除指定参数。</li>
+                            </ul>
+                        </section>
+                    </div>
+                    <div class="help-modal__example" aria-label="快捷下载示例">
+                        <span>示例：</span>
+                        <code>https://getm3u8.com?source=https%3A%2F%2Fexample.com%2Fvideo.m3u8&amp;title=demo&amp;format=mp4</code>
+                    </div>
+                    <div class="help-modal__feedback" aria-label="联系与反馈">
+                        <div>
+                            <h4><i data-lucide="message-circle" aria-hidden="true"></i>联系与反馈</h4>
+                            <p>如果遇到无法下载、解析异常或界面问题，可以通过以下方式反馈。</p>
+                        </div>
+                        <div class="help-modal__feedback-links">
+                            <a href="mailto:getm3u8@163.com"><i data-lucide="mail" aria-hidden="true"></i>getm3u8@163.com</a>
+                            <a href="https://github.com/caiweiming/get-m3u8" target="_blank" rel="noopener noreferrer"><i data-lucide="github" aria-hidden="true"></i>GitHub</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Task Details Modal -->
+            <div id="details-modal" class="modal modal-panel large" data-modal="details" aria-hidden="true">
+                <div class="modal-header">
+                    <h3>任务详情</h3>
+                    <button class="close-modal-btn modal-close-btn"><i data-lucide="x"></i></button>
+                </div>
+                <div class="modal-body">
+                    <div id="detail-content"></div>
+                </div>
+            </div>
+        </div>
+        <div id="app-tooltip" class="app-tooltip" aria-hidden="true"></div>
+    </div>
+    <script src="app.js?v=202606281858"></script>
+</body>
+</html>
