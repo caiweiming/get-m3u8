@@ -7,6 +7,7 @@
     <meta name="description" content="M3U8下载是纯浏览器 HLS 下载与播放工具，支持 m3u8 在线预览播放、AES-128 解密、分片下载、TS 保存、MP4 导出、范围下载和任务恢复。">
     <meta name="keywords" content="m3u8下载,m3u8播放器,m3u8在线播放,HLS下载,HLS播放器,AES-128,TS,MP4,视频分片下载,m3u8 downloader">
     <meta name="author" content="getm3u8.com">
+    <meta name="application-version" content="v1.1.0">
     <meta name="robots" content="index, follow">
     <meta name="theme-color" content="#26282b">
     <link rel="canonical" href="https://getm3u8.com/">
@@ -17,16 +18,16 @@
     <meta name="twitter:card" content="summary">
     <meta name="twitter:title" content="M3U8下载">
     <meta name="twitter:description" content="纯浏览器 m3u8 / HLS 下载与播放工具，支持在线播放、分片下载、解密、保存和恢复。">
-    <link rel="icon" href="favicon.svg?v=202606281858" type="image/svg+xml">
-    <link rel="stylesheet" href="style.css?v=202606281858">
+    <link rel="icon" href="favicon.svg?v=202609191657" type="image/svg+xml">
+    <link rel="stylesheet" href="style.css?v=202609191657">
     <!-- Lucide Icons (local vendor bundle) -->
-    <script src="vendor/lucide.min.js?v=202606281858"></script>
+    <script src="vendor/lucide.min.js?v=202609191657"></script>
     <!-- HLS preview runtime (local vendor bundle) -->
-    <script src="vendor/hls.min.js?v=202606281858"></script>
+    <script src="vendor/hls.min.js?v=202609191657"></script>
     <!-- TS to MP4 transmux runtime (local vendor bundle) -->
-    <script src="vendor/mux.min.js?v=202606281858"></script>
+    <script src="vendor/mux.min.js?v=202609191657"></script>
     <!-- StreamSaver fallback runtime (local vendor bundle) -->
-    <script src="vendor/streamsaver.js?v=202606281858"></script>
+    <script src="vendor/streamsaver.js?v=202609191657"></script>
 </head>
 <body>
     <div id="app-loader" class="app-loader" aria-hidden="true"></div>
@@ -105,6 +106,21 @@
                         </div>
                     </div>
                 </div>
+                <div id="aggregate-download-status" class="download-runtime-summary" role="status" aria-live="polite" aria-label="下载运行状态">
+                    <div class="download-runtime-summary__metric download-runtime-summary__metric--primary">
+                        <span>总速度</span>
+                        <strong id="aggregate-download-speed">0 B/s</strong>
+                    </div>
+                    <div class="download-runtime-summary__metric download-runtime-summary__metric--secondary download-runtime-summary__metric--active">
+                        <span>活动任务</span>
+                        <strong id="aggregate-active-tasks">0</strong>
+                    </div>
+                    <div class="download-runtime-summary__metric download-runtime-summary__metric--secondary download-runtime-summary__metric--requests">
+                        <span>请求槽</span>
+                        <strong id="aggregate-request-slots">0 / 8</strong>
+                        <small id="aggregate-request-state">可用</small>
+                    </div>
+                </div>
                 <div id="task-cache-status-bar" class="task-cache-status-bar" aria-label="本地缓存状态">
                     <div class="task-cache-status-bar__main">
                         <span class="task-cache-status-bar__label">本地缓存</span>
@@ -124,7 +140,7 @@
         </main>
 
         <footer class="app-footer">
-            <p>© 2026 M3U8下载. All rights reserved.</p>
+            <p>© 2026 M3U8下载. All rights reserved. <span class="app-footer__separator" aria-hidden="true">·</span> <span class="app-version">v1.1.0</span></p>
         </footer>
 
         <!-- Modals -->
@@ -494,6 +510,6 @@
         </div>
         <div id="app-tooltip" class="app-tooltip" aria-hidden="true"></div>
     </div>
-    <script src="app.js?v=202606281858"></script>
+    <script src="app.js?v=202609191657"></script>
 </body>
 </html>

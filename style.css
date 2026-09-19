@@ -438,6 +438,81 @@ body.modal-open {
     height: 16px;
 }
 
+.download-runtime-summary {
+    display: grid;
+    grid-template-columns: minmax(0, 1.45fr) minmax(9.5rem, 0.8fr) minmax(12rem, 1fr);
+    width: 100%;
+    min-height: 3rem;
+    margin: -0.25rem 0 0.875rem;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-control);
+    background: var(--modal-shell-bg);
+    overflow: hidden;
+}
+
+.download-runtime-summary__metric {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    min-width: 0;
+    min-height: 3rem;
+    padding: 0.45rem 0.75rem;
+    color: var(--text-muted);
+    font-size: 0.8125rem;
+}
+
+.download-runtime-summary__metric--primary {
+    justify-content: flex-start;
+    gap: 0.75rem;
+    padding-left: 1rem;
+    background: rgba(38, 40, 43, 0.035);
+}
+
+.download-runtime-summary__metric + .download-runtime-summary__metric {
+    border-left: 1px solid var(--border-color);
+}
+
+.download-runtime-summary__metric strong {
+    min-width: 4.75rem;
+    color: var(--text-main);
+    font-variant-numeric: tabular-nums;
+    font-weight: 650;
+    text-align: right;
+    white-space: nowrap;
+}
+
+.download-runtime-summary__metric--primary strong {
+    font-size: 1.05rem;
+    font-weight: 750;
+}
+
+.download-runtime-summary__metric--requests {
+    gap: 0.65rem;
+}
+
+.download-runtime-summary__metric small {
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    white-space: nowrap;
+}
+
+.download-runtime-summary__metric small.is-saturated {
+    padding: 0.12rem 0.4rem;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    color: var(--text-muted);
+    background: rgba(38, 40, 43, 0.045);
+}
+
+[data-theme="dark"] .download-runtime-summary__metric--primary {
+    background: rgba(255, 255, 255, 0.055);
+}
+
+[data-theme="dark"] .download-runtime-summary__metric small.is-saturated {
+    background: rgba(255, 255, 255, 0.06);
+}
+
 .task-cache-status-bar {
     display: flex;
     align-items: center;
@@ -1099,6 +1174,39 @@ svg.task-row__status-icon {
         flex: 0 0 auto;
     }
 
+    .download-runtime-summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        margin-top: -0.125rem;
+    }
+
+    .download-runtime-summary__metric {
+        align-items: center;
+        min-height: 2.5rem;
+        padding: 0.4rem 0.35rem;
+        font-size: 0.75rem;
+        text-align: center;
+    }
+
+    .download-runtime-summary__metric--primary {
+        grid-column: 1 / -1;
+        justify-content: space-between;
+        min-height: 2.75rem;
+        padding: 0.5rem 0.75rem;
+    }
+
+    .download-runtime-summary__metric--active {
+        border-left: 0;
+    }
+
+    .download-runtime-summary__metric--requests {
+        border-left: 1px solid var(--border-color);
+    }
+
+    .download-runtime-summary__metric strong {
+        min-width: 0;
+        text-align: center;
+    }
+
     .task-cache-status-bar {
         align-items: stretch;
         flex-direction: column;
@@ -1262,6 +1370,16 @@ svg.task-row__status-icon {
     text-align: center;
     font-size: 0.875rem;
     color: var(--text-muted);
+}
+
+.app-footer__separator {
+    margin: 0 0.3rem;
+    color: var(--border-color);
+}
+
+.app-version {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
 }
 
 /* Modals & Forms */
