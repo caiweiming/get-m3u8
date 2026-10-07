@@ -7,6 +7,8 @@ const taskListContainer = document.getElementById('task-list');
 const aggregateDownloadSpeedElement = document.getElementById('aggregate-download-speed');
 const aggregateActiveTasksElement = document.getElementById('aggregate-active-tasks');
 const aggregateRequestSlotsElement = document.getElementById('aggregate-request-slots');
+const aggregateTaskModeElement = document.getElementById('aggregate-task-mode');
+const taskCoordinationNoticeElement = document.getElementById('task-coordination-notice');
 const modalOverlay = document.getElementById('modal-overlay');
 const appLoader = document.getElementById('app-loader');
 const newTaskModal = document.getElementById('new-task-modal');
@@ -38,13 +40,33 @@ let hasShownSegmentCacheWriteWarning = false;
 let activeTaskId = null;
 const runningTaskExecutions = new Set();
 const runningTaskExecutionPromises = new Map();
+const taskExecutionEpochs = new Map();
+const pendingTaskPersistence = new Map();
+const localTaskCommitRevisions = new Map();
+const confirmedDeletedTaskIds = new Set();
+let lastAppliedTaskRevision = 0;
+const suspendedTaskExecutions = new Set();
+let taskRepository = null;
+let coordinatorRuntime = null;
+let sharedTaskRuntimeReady = false;
+let coordinatorRoleTransition = Promise.resolve();
+let coordinatorTransitionPending = false;
+const runtimeRole = { isCoordinator: false, coordinationAvailable: false, unsafeLegacyWriter: false, ownerPageId: null, executionEpoch: 0 };
+const taskMode = { parallelEnabled: false };
 let activeTaskDetailsId = null;
 let pendingQualitySelectionId = '';
 let pendingTaskDraft = null;
+const automaticQualityModalShownVersions = new Map();
+const pendingAutomaticQualityTaskIds = [];
+let automaticQualityModalTaskId = null;
 let activeRangeSelectionTaskId = null;
 let pendingRangeTaskDraft = null;
 let pendingRangeStart = '';
 let pendingRangeEnd = '';
+let activeRangeSelectionVersion = null;
+const taskIntentWakeups = new Set();
+const standaloneTaskIntentPromises = new Map();
+let singleTaskModeTransition = null;
 let activeForceMergeTaskId = null;
 let pendingForceMergeMode = 'prefix';
 let pendingDeleteConfirmation = null;
@@ -73,7 +95,6 @@ const downloadObjectUrlRecords = new Map();
 const pendingRemovedTaskCleanups = new Set();
 const downloadByteMemoryReservations = new WeakMap();
 const aes128KeyCache = new Map();
-let segmentCacheDbPromise = null;
 let segmentCacheStatusElements = null;
 let nextPendingTaskProbeId = 1;
 
@@ -396,6 +417,7 @@ function enqueueFinalExport(operation) {
 
 function enqueueTaskFinalExport(taskId, operation) {
     const normalizedTaskId = String(taskId || '');
+    const executionEpoch = typeof getTaskExecutionEpoch === 'function' ? getTaskExecutionEpoch(taskId) : null;
     if (!normalizedTaskId) {
         return enqueueFinalExport(async () => ({
             cancelled: false,
@@ -430,10 +452,14 @@ function enqueueTaskFinalExport(taskId, operation) {
         if (record.cancelled || typeof queuedTaskOperation !== 'function') {
             return { cancelled: true, value: undefined };
         }
+        if (typeof isTaskExecutionCurrent === 'function' && !isTaskExecutionCurrent(taskId, executionEpoch)) {
+            return { cancelled: true, value: undefined };
+        }
         record.started = true;
         const value = await queuedTaskOperation();
         return { cancelled: record.cancelled, value };
     });
+    record.settlement = queuedOperation;
 
     return Promise.race([queuedOperation, cancellationPromise]).finally(() => {
         records.delete(record);
@@ -473,6 +499,8 @@ function renderAggregateDownloadStatus(model, elements = null) {
         targetElements.requestState.textContent = isSaturated ? '已满' : '可用';
         targetElements.requestState.classList?.toggle('is-saturated', isSaturated);
     }
+    const modeElement = targetElements.mode ?? (typeof aggregateTaskModeElement === 'undefined' ? null : aggregateTaskModeElement);
+    if (modeElement) modeElement.textContent = typeof taskMode !== 'undefined' && taskMode.parallelEnabled ? '并行任务模式' : '单任务模式';
     return true;
 }
 
@@ -531,15 +559,21 @@ function getDownloadSourceKey(resourceUrl, fallbackUrl = '') {
 function beginStandaloneTaskRequestScope(task) {
     const taskId = String(task?.id || '');
     if (!taskId) return task;
+    const executionEpoch = typeof getTaskExecutionEpoch === 'function' ? getTaskExecutionEpoch(task) : null;
+    if (typeof createTaskExecutionGuard === 'function') {
+        createTaskExecutionGuard({ ...task, _executionEpoch: executionEpoch })();
+        taskExecutionEpochs.set(taskId, executionEpoch);
+    }
     let scope = standaloneTaskRequestScopes.get(taskId);
     if (!scope) {
-        scope = { count: 0, waiters: [] };
+        scope = { count: 0, waiters: [], controllers: new Map() };
         standaloneTaskRequestScopes.set(taskId, scope);
     }
     scope.count += 1;
     downloadRequestScheduler.startTask(taskId, task?.concurrency);
     return {
         ...task,
+        _executionEpoch: executionEpoch,
         isScheduledDownloadRequest: true
     };
 }
@@ -553,6 +587,7 @@ function endStandaloneTaskRequestScope(taskId) {
     standaloneTaskRequestScopes.delete(normalizedTaskId);
     if (!runningTaskExecutions.has(normalizedTaskId)) {
         downloadRequestScheduler.unregisterTask(normalizedTaskId);
+        if (typeof taskExecutionEpochs !== 'undefined') taskExecutionEpochs.delete(normalizedTaskId);
     }
     scope.waiters.splice(0).forEach(resolve => resolve());
 }
@@ -584,6 +619,9 @@ async function abortTaskStreamWriterForTask(taskId) {
 }
 
 async function withDownloadRequestLease(task, resourceUrl, operation) {
+    const assertCurrent = task?.id && !task?.isPreviewRequest && typeof createTaskExecutionGuard === 'function'
+        ? createTaskExecutionGuard(task) : () => {};
+    assertCurrent();
     const taskId = String(task?.id || '');
     const sourceKey = getDownloadSourceKey(resourceUrl, task?.url);
     const scheduler = typeof downloadRequestScheduler !== 'undefined'
@@ -597,6 +635,21 @@ async function withDownloadRequestLease(task, resourceUrl, operation) {
         task?.isScheduledDownloadRequest
         || executionStore?.has(taskId)
     );
+    const execute = async () => {
+        const probeControllers = task?.isTaskProbe && typeof standaloneTaskRequestScopes !== 'undefined'
+            ? standaloneTaskRequestScopes.get(taskId)?.controllers : null;
+        const controller = taskId && !task?.isPreviewRequest && (!task?.isTaskProbe || probeControllers)
+            && typeof getTaskRequestControllerMap === 'function' && typeof AbortController === 'function'
+            ? new AbortController() : null;
+        const controllerMap = controller ? probeControllers || getTaskRequestControllerMap(taskId) : null;
+        const requestKey = Symbol('task-request');
+        controllerMap?.set(requestKey, controller);
+        try {
+            return await operation(controller?.signal);
+        } finally {
+            controllerMap?.delete(requestKey);
+        }
+    };
     if (
         task?.isPreviewRequest
         || !scheduler
@@ -604,12 +657,15 @@ async function withDownloadRequestLease(task, resourceUrl, operation) {
         || !registeredTasks[taskId]
         || !isScheduledDownloadRequest
     ) {
-        const result = await operation();
+        const result = await execute();
+        assertCurrent();
         return result?.value ?? result;
     }
     const lease = await scheduler.acquire(taskId, sourceKey);
     try {
-        const result = await operation();
+        assertCurrent();
+        const result = await execute();
+        assertCurrent();
         const resultStatus = Number(result?.status);
         const retryAfterMs = typeof parseRetryAfterMilliseconds === 'function'
             ? parseRetryAfterMilliseconds(result?.value?.response || result?.response)
@@ -658,7 +714,7 @@ if (globalThis.streamSaver) {
 const DEFAULT_TASK_PARAMS_STORAGE_KEY = 'default-task-params';
 const TASKS_STORAGE_KEY = 'm3u8-downloader-tasks';
 const SEGMENT_CACHE_DB_NAME = 'm3u8-downloader-segment-cache';
-const SEGMENT_CACHE_DB_VERSION = 1;
+const SEGMENT_CACHE_DB_VERSION = 2;
 const SEGMENT_CACHE_STORE_NAME = 'segments';
 const DEFAULT_TASK_PARAMS = {
     titleTemplate: 'video-{id}',
@@ -924,8 +980,8 @@ function removeIgnoredSourceParams(source, ignoreNames) {
     }
 }
 
-function init() {
-    currentTasks = loadTasksFromStorage();
+async function init() {
+    await initializeSharedTaskRuntime();
     applyTheme(currentTheme);
     applyDefaultTaskParamsToSettingsForm();
     resetNewTaskFormToDefaults();
@@ -933,14 +989,581 @@ function init() {
     updateAggregateDownloadStatus();
     setupEventListeners();
     applyQuickDownloadFromLocation();
-    scheduleNextQueuedTask();
-    hydrateRestoredTasksFromSegmentCache().finally(() => {
-        if (runningTaskExecutions.size === 0) {
+    if (coordinatorRuntime) await coordinatorRuntime.start();
+    globalThis.addEventListener('pagehide', () => {
+        sharedTaskRuntimeReady = false;
+        void coordinatorRuntime?.stop();
+        void stopLocalTaskExecutions('pagehide');
+    });
+    globalThis.addEventListener('pageshow', event => {
+        if (event.persisted) void coordinatorRuntime?.start();
+    });
+    hideAppLoaderAfterDebugDelay();
+}
+
+function canExecuteCoordinatorWork(executionEpoch = runtimeRole.executionEpoch) {
+    return Boolean(sharedTaskRuntimeReady && runtimeRole.coordinationAvailable
+        && runtimeRole.isCoordinator && executionEpoch === runtimeRole.executionEpoch
+        && coordinatorRuntime?.isCoordinator()
+        && coordinatorRuntime.getExecutionEpoch() === executionEpoch);
+}
+
+function getTaskExecutionEpoch(taskOrId) {
+    if (taskOrId && typeof taskOrId === 'object' && taskOrId._executionEpoch != null) {
+        return taskOrId._executionEpoch;
+    }
+    const taskId = String(typeof taskOrId === 'object' ? taskOrId?.id : taskOrId);
+    return taskExecutionEpochs.get(taskId) ?? runtimeRole.executionEpoch;
+}
+
+function isTaskExecutionCurrent(taskId, executionEpoch) {
+    return canExecuteCoordinatorWork(executionEpoch)
+        && !suspendedTaskExecutions.has(String(taskId))
+        && (typeof confirmedDeletedTaskIds === 'undefined' || !confirmedDeletedTaskIds.has(String(taskId)))
+        && (taskExecutionEpochs.get(String(taskId)) ?? executionEpoch) === executionEpoch;
+}
+
+function createTaskExecutionGuard(task) {
+    const executionEpoch = getTaskExecutionEpoch(task);
+    return () => {
+        if (!isTaskExecutionCurrent(task.id, executionEpoch)) {
+            throw new DOMException('Task coordinator ownership changed', 'AbortError');
+        }
+    };
+}
+
+async function initializeSharedTaskRuntime() {
+    try {
+        const coordination = globalThis.M3U8TaskCoordination;
+        taskRepository = coordination.createTaskRepository({
+            indexedDB: globalThis.indexedDB,
+            localStorage: globalThis.localStorage,
+            normalizeTask: task => ({ ...getPersistableTaskSnapshot(task),
+                version: task.version, queueOrder: task.queueOrder, deleting: task.deleting })
+        });
+        await taskRepository.initialize();
+        applySharedTaskSnapshot(await taskRepository.readSnapshot(), { force: true, render: false });
+        await hydrateRestoredTasksFromSegmentCache({ persist: false, render: false });
+        coordinatorRuntime = coordination.createCoordinatorRuntime({
+            repository: taskRepository,
+            onRoleChange: role => { void handleCoordinatorRoleChange(role); },
+            onSnapshot: snapshot => applySharedTaskSnapshot(snapshot),
+            onIntent: handleSharedTaskIntent
+        });
+    } catch (error) {
+        runtimeRole.coordinationAvailable = false;
+        sharedTaskRuntimeReady = false;
+        showToast('共享任务存储不可用，下载已停用', { type: 'error' });
+        console.error('Shared task initialization failed', error);
+    }
+}
+
+function applySharedTaskSnapshot(snapshot, options = {}) {
+    if (typeof taskIntentWakeups !== 'undefined') taskIntentWakeups.forEach(wake => wake());
+    if (!snapshot || !Array.isArray(snapshot.tasks)) return;
+    if (!options.force && coordinatorTransitionPending) return;
+    const snapshotRevision = Number(snapshot.taskRevision) || 0;
+    if (snapshotRevision < lastAppliedTaskRevision) return;
+    lastAppliedTaskRevision = snapshotRevision;
+    const wasParallel = taskMode.parallelEnabled;
+    taskMode.parallelEnabled = snapshot.settings?.parallelTaskDownloads === true;
+    const localTasks = new Map(currentTasks.map(task => [String(task.id), task]));
+    const sharedIds = new Set(snapshot.tasks.map(task => String(task.id)));
+    const confirmDeletedTask = taskId => {
+        confirmedDeletedTaskIds.add(taskId);
+        const pending = pendingTaskPersistence.get(taskId);
+        if (pending) { pending.cancelled = true; pending.snapshot = null; }
+        // Standalone retries may own requests even without a normal lifecycle.
+        abortTaskRequests(taskId);
+        downloadRequestScheduler.stopTask(taskId);
+        cancelPendingTaskFinalExports(taskId);
+    };
+    currentTasks = snapshot.tasks.map(task => {
+        const taskId = String(task.id);
+        const local = localTasks.get(taskId);
+        if (task.deleting || task.status === 'deleting') {
+            confirmDeletedTask(taskId);
+            return null;
+        }
+        if (confirmedDeletedTaskIds.has(taskId)) return null;
+        if (!options.force && runtimeRole.isCoordinator && local
+            && (runningTaskExecutions.has(taskId) || pendingTaskPersistence.has(taskId)
+                || Number(local.version) >= Number(task.version))) return local;
+        return task;
+    }).filter(Boolean);
+    if (!options.force && runtimeRole.isCoordinator) {
+        localTasks.forEach((task, taskId) => {
+            if (sharedIds.has(taskId) || confirmedDeletedTaskIds.has(taskId)) return;
+            const pending = pendingTaskPersistence.get(taskId);
+            const hasCurrentWrite = pending && !pending.cancelled && pending.executionEpoch === runtimeRole.executionEpoch;
+            const hasCurrentExecution = runningTaskExecutions.has(taskId)
+                && taskExecutionEpochs.get(taskId) === runtimeRole.executionEpoch;
+            const commitRevision = localTaskCommitRevisions.get(taskId) || 0;
+            if (commitRevision > 0 && snapshotRevision > commitRevision) {
+                confirmDeletedTask(taskId);
+                return;
+            }
+            if (hasCurrentWrite || hasCurrentExecution || commitRevision > snapshotRevision) currentTasks.push(task);
+            else confirmDeletedTask(taskId);
+        });
+    }
+    if (options.render !== false) {
+        renderTasks();
+        updateAggregateDownloadStatus();
+        syncActiveTaskDetails();
+        if (typeof queueAutomaticQualitySelectionModals === 'function') queueAutomaticQualitySelectionModals();
+    }
+    if (wasParallel && !taskMode.parallelEnabled && canExecuteCoordinatorWork()) {
+        void enforceSingleTaskMode();
+    } else if (canExecuteCoordinatorWork()) {
+        scheduleNextQueuedTask();
+    }
+}
+
+function persistCoordinatorTask(task, executionEpoch = getTaskExecutionEpoch(task)) {
+    if (!taskRepository || !canExecuteCoordinatorWork(executionEpoch)
+        || confirmedDeletedTaskIds.has(String(task.id))) {
+        return Promise.resolve({ ok: false, stale: true, reason: 'stale-epoch' });
+    }
+    const taskId = String(task.id);
+    const snapshot = { ...getPersistableTaskSnapshot(task), version: task.version, queueOrder: task.queueOrder };
+    let record = pendingTaskPersistence.get(taskId);
+    if (record) {
+        if (record.executionEpoch !== executionEpoch || record.cancelled) {
+            return Promise.resolve({ ok: false, stale: true, reason: 'stale-epoch' });
+        }
+        if (!record.accepting) record = null;
+    }
+    const startDrain = !record;
+    if (!record) {
+        record = { executionEpoch, snapshot: null, version: findTaskById(taskId)?.version ?? task.version,
+            cancelled: false, accepting: true, revision: 0, waiters: [], promise: null };
+        pendingTaskPersistence.set(taskId, record);
+    }
+    const revision = ++record.revision;
+    record.snapshot = snapshot;
+    const committed = new Promise(resolve => record.waiters.push({ revision, resolve }));
+    if (!startDrain) return committed;
+    record.promise = Promise.resolve().then(async () => {
+        let result = { ok: true };
+        try {
+            while (record.snapshot && !record.cancelled) {
+                if (!canExecuteCoordinatorWork(executionEpoch)) {
+                    result = { ok: false, stale: true, reason: 'stale-epoch' };
+                    break;
+                }
+                const next = { ...record.snapshot, version: record.version };
+                const writingRevision = record.revision;
+                record.snapshot = null;
+                result = await taskRepository.putTask(next, executionEpoch);
+                if (!result.ok) {
+                    record.cancelled = true;
+                    if (result.reason === 'task-deleting') confirmedDeletedTaskIds.add(taskId);
+                    if (['task-deleting', 'version-conflict'].includes(result.reason)) {
+                        coordinatorRuntime.notifyChanged();
+                    } else {
+                        void handleStaleCoordinatorWork(result.reason);
+                    }
+                    break;
+                }
+                record.version = result.value.version;
+                if (Number.isFinite(result.taskRevision)) {
+                    localTaskCommitRevisions.set(taskId, result.taskRevision);
+                }
+                if (!record.cancelled && canExecuteCoordinatorWork(executionEpoch)) {
+                    const local = findTaskById(taskId);
+                    if (local) {
+                        local.version = result.value.version;
+                        local.queueOrder = result.value.queueOrder;
+                    }
+                    coordinatorRuntime.notifyChanged();
+                }
+                const coveredWaiters = record.waiters.filter(waiter => waiter.revision <= writingRevision);
+                record.waiters = record.waiters.filter(waiter => waiter.revision > writingRevision);
+                coveredWaiters.forEach(waiter => waiter.resolve(result));
+            }
+        } catch (error) {
+            void handleStaleCoordinatorWork(error?.message || 'persistence-failed');
+            result = { ok: false, reason: 'persistence-failed' };
+        } finally {
+            // Close admission synchronously with the last loop check. A later
+            // microtask must create another drain, never append to this one.
+            record.accepting = false;
+            record.snapshot = null;
+            if (pendingTaskPersistence.get(taskId) === record) pendingTaskPersistence.delete(taskId);
+            const cancelled = result.ok ? { ok: false, stale: true, reason: 'cancelled' } : result;
+            record.waiters.splice(0).forEach(waiter => waiter.resolve(cancelled));
+        }
+        return result;
+    });
+    return committed;
+}
+
+async function handleStaleCoordinatorWork(reason) {
+    sharedTaskRuntimeReady = false;
+    runtimeRole.isCoordinator = false;
+    await Promise.allSettled([coordinatorRuntime?.stop(), stopLocalTaskExecutions(reason)]);
+    try {
+        if (taskRepository) applySharedTaskSnapshot(await taskRepository.readSnapshot(), { force: true });
+    } catch (error) {
+        console.error('Shared task reload failed', error);
+    }
+}
+
+async function stopLocalTaskExecutions(reason) {
+    void reason;
+    const taskIds = new Set([...runningTaskExecutions, ...runningTaskExecutionPromises.keys(),
+        ...standaloneTaskRequestScopes.keys(), ...taskStreamWriters.keys(), ...pendingTaskFinalExports.keys(),
+        ...(typeof standaloneTaskIntentPromises !== 'undefined' ? standaloneTaskIntentPromises.keys() : [])]);
+    pendingTaskPersistence.forEach(record => { record.cancelled = true; record.snapshot = null; });
+    const streamTaskIds = new Set(taskStreamWriters.keys());
+    currentTasks = currentTasks.map(task => streamTaskIds.has(String(task.id))
+        ? { ...task, status: 'await_save_target', actualWriteMode: '',
+            downloadSpeedBytesPerSecond: 0, estimatedRemainingSeconds: 0 } : task);
+    const settlements = [...pendingTaskPersistence.values()].map(record => record.promise);
+    taskIds.forEach(taskId => {
+        suspendedTaskExecutions.add(taskId);
+        abortTaskRequests(taskId);
+        downloadRequestScheduler.stopTask(taskId);
+        cancelPendingTaskFinalExports(taskId);
+        settlements.push(abortTaskStreamWriterForTask(taskId),
+            runningTaskExecutionPromises.get(taskId), waitForStandaloneTaskRequestScopes(taskId));
+        if (typeof standaloneTaskIntentPromises !== 'undefined') settlements.push(...(standaloneTaskIntentPromises.get(taskId) || []));
+    });
+    await Promise.allSettled(settlements);
+    taskIds.forEach(taskId => {
+        runningTaskExecutions.delete(taskId);
+        runningTaskExecutionPromises.delete(taskId);
+        taskExecutionEpochs.delete(taskId);
+        suspendedTaskExecutions.delete(taskId);
+        downloadRequestScheduler.unregisterTask(taskId);
+    });
+    activeTaskId = null;
+}
+
+function handleCoordinatorRoleChange(role) {
+    const previous = { ...runtimeRole };
+    Object.assign(runtimeRole, role);
+    if (!role.isCoordinator || previous.executionEpoch !== role.executionEpoch) {
+        if (typeof pendingAutomaticQualityTaskIds !== 'undefined') pendingAutomaticQualityTaskIds.splice(0);
+        if (typeof automaticQualityModalShownVersions !== 'undefined') automaticQualityModalShownVersions.clear();
+        if (typeof automaticQualityModalTaskId !== 'undefined') automaticQualityModalTaskId = null;
+        if (typeof activeModalId !== 'undefined'
+            && typeof pendingModalId !== 'undefined'
+            && (activeModalId === 'download-quality' || pendingModalId === 'download-quality')) {
+            closeModal();
+        }
+    }
+    sharedTaskRuntimeReady = false;
+    coordinatorTransitionPending = true;
+    const stopping = previous.isCoordinator && (!role.isCoordinator || previous.executionEpoch !== role.executionEpoch)
+        ? stopLocalTaskExecutions('role-loss') : Promise.resolve();
+    const transition = coordinatorRoleTransition.catch(() => {}).then(async () => {
+        await stopping;
+        if (runtimeRole.executionEpoch !== role.executionEpoch || runtimeRole.isCoordinator !== role.isCoordinator) return;
+        if (!taskRepository) return;
+        applySharedTaskSnapshot(await taskRepository.readSnapshot(), { force: true, render: false });
+        await hydrateRestoredTasksFromSegmentCache({ persist: false, render: false });
+        if (runtimeRole.executionEpoch !== role.executionEpoch || runtimeRole.isCoordinator !== role.isCoordinator) return;
+        if (role.isCoordinator) {
+            sharedTaskRuntimeReady = true;
+            const recoveryWrites = [];
+            currentTasks = currentTasks.map(task => {
+                const streamOutput = task.actualWriteMode === 'file-system' || task.actualWriteMode === 'stream-saver';
+                if (task.status === 'deleting' || task.deleting) return task;
+                const interrupted = (task.segments || []).some(segment => ['downloading', 'retrying'].includes(segment.status));
+                const hadLifecycle = ['detecting', 'resolving', 'preparing', 'downloading', 'finalizing'].includes(task.status);
+                const recoverStream = streamOutput && !['completed', 'partial_completed'].includes(task.status);
+                if (!recoverStream && !hadLifecycle && !interrupted) return task;
+                const recovered = { ...task,
+                    status: recoverStream ? 'await_save_target' : hadLifecycle ? 'queued' : task.status,
+                    actualWriteMode: recoverStream ? '' : task.actualWriteMode,
+                    outputFileName: recoverStream ? '' : task.outputFileName,
+                    downloadSpeedBytesPerSecond: 0, estimatedRemainingSeconds: 0,
+                    segments: (task.segments || []).map(segment => ['downloading', 'retrying'].includes(segment.status)
+                        ? { ...segment, status: hadLifecycle || recoverStream || task.status === 'queued' || task.status === 'paused' ? 'idle' : 'failed',
+                            attemptCount: 0, errorMessage: '' } : segment) };
+                recoveryWrites.push(persistCoordinatorTask(recovered, role.executionEpoch));
+                return recovered;
+            });
+            await Promise.all(recoveryWrites);
+            if (canExecuteCoordinatorWork(role.executionEpoch)
+                && typeof cleanupOrphanedSegmentCacheOnStartup === 'function') {
+                await cleanupOrphanedSegmentCacheOnStartup();
+            }
+        }
+        renderTasks();
+        updateAggregateDownloadStatus();
+        syncActiveTaskDetails();
+        if (typeof queueAutomaticQualitySelectionModals === 'function') queueAutomaticQualitySelectionModals();
+    }).catch(error => {
+        sharedTaskRuntimeReady = false;
+        console.error('Coordinator role transition failed', error);
+    }).finally(() => {
+        if (coordinatorRoleTransition !== transition) return;
+        coordinatorTransitionPending = false;
+        if (canExecuteCoordinatorWork(role.executionEpoch)) {
             scheduleNextQueuedTask();
+            if (typeof queueAutomaticQualitySelectionModals === 'function') queueAutomaticQualitySelectionModals();
         }
     });
-    cleanupOrphanedSegmentCacheOnStartup();
-    hideAppLoaderAfterDebugDelay();
+    coordinatorRoleTransition = transition;
+    return transition;
+}
+
+async function handleSharedTaskIntent(intent, context) {
+    await coordinatorRoleTransition;
+    return applyTaskIntent(intent, context.executionEpoch, context);
+}
+
+async function submitTaskAction(type, taskId, payload = {}, expectedVersion) {
+    if (!coordinatorRuntime || !taskRepository || !runtimeRole.coordinationAvailable) {
+        showToast('共享任务服务不可用，请刷新页面后重试', { type: 'error' });
+        return { ok: false, reason: 'coordination-unavailable' };
+    }
+    try {
+        const submitted = await coordinatorRuntime.submitIntent(type, taskId, payload, expectedVersion);
+        if (!submitted.ok) {
+            showToast(type === 'select_save_target'
+                ? '浏览器无法共享此保存位置，请在下载执行页重新选择保存位置'
+                : '操作未能提交，请刷新页面后重试', { type: 'error' });
+            return submitted;
+        }
+        const deadline = Date.now() + 30000;
+        while (Date.now() < deadline) {
+            const receipt = await taskRepository.readIntent(submitted.value.id);
+            if (receipt && ['completed', 'failed'].includes(receipt.status)) {
+                const result = receipt.result || { ok: true };
+                applySharedTaskSnapshot(await taskRepository.readSnapshot());
+                if (result.taskId && (type === 'create' || result.reason === 'version-conflict')) {
+                    pendingTaskSelectionFocusId = `task-select-${result.taskId}`;
+                    renderTasks();
+                }
+                if (!result.ok && result.reason !== 'version-conflict') {
+                    showToast(result.message || '操作未完成，请刷新任务状态后重试', { type: 'error' });
+                }
+                return result;
+            }
+            await new Promise(resolve => {
+                let timer;
+                const wake = () => { clearTimeout(timer); taskIntentWakeups.delete(wake); resolve(); };
+                taskIntentWakeups.add(wake);
+                timer = setTimeout(wake, 250);
+            });
+        }
+        showToast('操作已入队，等待下载页处理；请稍后查看任务状态', { type: 'info' });
+        return { ok: false, pending: true, reason: 'intent-pending', intentId: submitted.value.id };
+    } catch (error) {
+        showToast(type === 'select_save_target'
+            ? '浏览器无法共享此保存位置，请在下载执行页重新选择保存位置'
+            : '操作未能提交，请刷新页面后重试', { type: 'error' });
+        return { ok: false, reason: 'submission-failed' };
+    }
+}
+
+function taskIntentResult(result, taskId) {
+    return { ok: result.ok === true, reason: result.reason || '',
+        taskId: String(result.value?.id || taskId || ''), duplicate: result.duplicate === true,
+        version: result.value?.version };
+}
+
+async function applyTaskIntent(intent, executionEpoch, intentContext = {}) {
+    if (!canExecuteCoordinatorWork(executionEpoch)) throw new Error('Coordinator epoch changed');
+    const taskId = String(intent.taskId || '');
+    const payload = intent.payload || {};
+    if (intent.type === 'cleanup_cache') {
+        const result = await cleanupOrphanedSegmentCache();
+        return { ok: result.available === true, removedCount: result.removedCount,
+            reason: result.available ? '' : 'cache-unavailable' };
+    }
+    if (intent.type === 'clear_cache') {
+        const cleared = await clearSegmentCache(executionEpoch);
+        if (!cleared) return { ok: false, reason: 'cache-unavailable' };
+        if (!canExecuteCoordinatorWork(executionEpoch)) throw new Error('Coordinator epoch changed');
+        resetTasksAfterSegmentCacheClear();
+        await Promise.all([...pendingTaskPersistence.values()].map(record => record.promise));
+        coordinatorRuntime.notifyChanged();
+        return { ok: true };
+    }
+    if (intent.type === 'update_settings') {
+        const result = await taskRepository.setSettings({ parallelTaskDownloads: payload.parallelTaskDownloads }, executionEpoch);
+        if (result.ok) {
+            applySharedTaskSnapshot(await taskRepository.readSnapshot());
+            coordinatorRuntime.notifyChanged();
+        }
+        return { ok: result.ok, reason: result.reason || '', settings: result.value,
+            taskRevision: result.taskRevision };
+    }
+    if (intent.type === 'create') {
+        const existing = (await taskRepository.readSnapshot()).tasks.find(task => String(task.id) === taskId);
+        if (existing) return { ok: true, taskId, duplicate: true, version: existing.version };
+        const draft = buildTaskFromResolvedDraft(payload, null);
+        draft.id = taskId || globalThis.M3U8TaskCoordination.createTaskId();
+        draft.sourceUrl = draft.url;
+        draft.creationFingerprintInputs = { url: draft.url, format: draft.format, streamSave: draft.streamSave,
+            downloadRangeMode: draft.downloadRangeMode, selectedQualityId: draft.selectedQualityId,
+            selectedAudioRenditionId: draft.selectedAudioRenditionId,
+            selectedSubtitleRenditionId: draft.selectedSubtitleRenditionId,
+            actualRangeStart: Number(payload.actualRangeStart) || 0, actualRangeEnd: Number(payload.actualRangeEnd) || 0 };
+        const result = await taskRepository.putTask(draft, executionEpoch);
+        if (result.ok) {
+            localTaskCommitRevisions.set(String(result.value.id), result.taskRevision);
+            if (!findTaskById(result.value.id)) currentTasks.push(result.value);
+            coordinatorRuntime.notifyChanged();
+            renderTasks();
+            scheduleNextQueuedTask();
+        }
+        return taskIntentResult(result, taskId);
+    }
+    if (intent.type === 'delete') {
+        const removed = await removeTasksById([taskId], executionEpoch);
+        return { ok: removed, taskId };
+    }
+    // Finish older progress commits before comparing a dialog's captured version.
+    const pending = pendingTaskPersistence.get(taskId);
+    if (pending) await pending.promise;
+    if (!canExecuteCoordinatorWork(executionEpoch)) throw new Error('Coordinator epoch changed');
+    const durable = (await taskRepository.readSnapshot()).tasks.find(task => String(task.id) === taskId);
+    if (!durable || durable.deleting) return { ok: false, reason: 'task-not-found', taskId };
+    if (intent.type.startsWith('select_')) {
+        if (intent.expectedVersion !== durable.version) return { ok: false, reason: 'version-conflict', taskId };
+        let patch;
+        if (intent.type === 'select_range' && durable.status === 'await_range_selection') {
+            if (getRangeValidationMessage(durable.segments.length, payload.start, payload.end)) {
+                return { ok: false, reason: 'invalid-range', taskId };
+            }
+            patch = { actualRangeStart: Number(payload.start), actualRangeEnd: Number(payload.end),
+                requestedSegmentCount: Number(payload.end) - Number(payload.start) + 1 };
+        } else if (intent.type === 'select_quality' && durable.status === 'await_variant_selection') {
+            const quality = durable.qualities.find(item => String(item.id) === String(payload.qualityId));
+            if (!quality) return { ok: false, reason: 'invalid-quality', taskId };
+            patch = { url: quality.url, playlistType: '', selectedQualityId: quality.id,
+                selectedQualityLabel: quality.label, selectedAudioRenditionId: payload.audioRenditionId || '',
+                selectedSubtitleRenditionId: payload.subtitleRenditionId || '',
+                selectedOutputMode: payload.audioRenditionId || payload.subtitleRenditionId ? 'separate-renditions' : 'single-video',
+                actualOutputMode: '', segments: [] };
+        } else if (intent.type === 'select_save_target' && durable.status === 'await_save_target') {
+            if (!payload.fileHandle || typeof payload.fileHandle.createWritable !== 'function') {
+                return { ok: false, reason: 'save-target-unavailable', taskId,
+                    message: '浏览器无法共享此保存位置，请在下载执行页重新选择保存位置' };
+            }
+            if (typeof payload.fileHandle.queryPermission === 'function'
+                && await payload.fileHandle.queryPermission({ mode: 'readwrite' }) !== 'granted') {
+                return { ok: false, reason: 'save-target-permission', taskId,
+                    message: '保存位置尚未授权，请在下载执行页重新选择并授权' };
+            }
+            patch = { saveTargetHandle: payload.fileHandle, actualWriteMode: '',
+                segments: (durable.segments || []).map(segment => segment.streamSaved && !segment.cacheStored
+                    ? { ...segment, status: 'idle', streamSaved: false, bytes: null, byteLength: 0 }
+                    : { ...segment, streamSaved: false }) };
+        } else return { ok: false, reason: 'version-conflict', taskId };
+        const result = await taskRepository.putTask({ ...durable, ...patch, status: 'queued', errorMessage: '',
+            expectedVersion: intent.expectedVersion }, executionEpoch);
+        if (result.ok) {
+            currentTasks = currentTasks.map(task => String(task.id) === taskId ? result.value : task);
+            localTaskCommitRevisions.set(taskId, result.taskRevision);
+            coordinatorRuntime.notifyChanged();
+            renderTasks();
+            scheduleNextQueuedTask();
+        }
+        return taskIntentResult(result, taskId);
+    }
+    const task = findTaskById(taskId);
+    if (!task) currentTasks.push(durable);
+    let operationResult = null;
+    if (intent.type === 'pause') pauseTask(taskId);
+    else if (intent.type === 'resume') resumeTask(taskId);
+    else if (intent.type === 'retry_incomplete') restartTaskFromIncompleteSegments(taskId);
+    else if (intent.type === 'retry_segment') operationResult = await admitTaskIntentOperation(taskId, executionEpoch,
+        () => retryTaskSegment(taskId, payload.sequence), intentContext.isCancelled);
+    else if (intent.type === 'redownload') redownloadCompletedTask(taskId);
+    else if (intent.type === 'save_completed') operationResult = await admitTaskIntentOperation(taskId, executionEpoch,
+        () => reSaveCompletedTask(taskId), intentContext.isCancelled);
+    else if (intent.type === 'force_merge') operationResult = await admitTaskIntentOperation(taskId, executionEpoch,
+        () => forceMergeTask(taskId, payload.mode), intentContext.isCancelled);
+    else return { ok: false, reason: 'unsupported-intent', taskId };
+    const updated = findTaskById(taskId);
+    if (!canExecuteCoordinatorWork(executionEpoch)) return { ok: false, reason: 'stale-epoch', taskId };
+    if (operationResult?.reason === 'intent-superseded') return { ok: false, reason: 'intent-superseded', taskId };
+    const persisted = updated ? await persistCoordinatorTask(updated, executionEpoch) : { ok: false, reason: 'task-not-found' };
+    if (operationResult?.ok === false) return taskIntentResult(operationResult, taskId);
+    return taskIntentResult(persisted, taskId);
+}
+
+function getTaskOperationIds() {
+    return new Set([...runningTaskExecutions, ...runningTaskExecutionPromises.keys(),
+        ...(typeof standaloneTaskIntentPromises !== 'undefined' ? standaloneTaskIntentPromises.keys() : [])]);
+}
+
+async function admitTaskIntentOperation(taskId, executionEpoch, operation, isIntentCancelled = () => false) {
+    // Waiting intents retain their durable claim without holding a request slot,
+    // task slot, heartbeat, or any other task's intent chain.
+    for (;;) {
+        if (isIntentCancelled()) return { ok: false, reason: 'intent-superseded' };
+        if (!isTaskExecutionCurrent(taskId, executionEpoch) || !findTaskById(taskId)) {
+            return { ok: false, reason: 'task-revoked' };
+        }
+        const occupied = getTaskOperationIds();
+        if (!singleTaskModeTransition && !coordinatorTransitionPending
+            && !occupied.has(taskId) && occupied.size < (taskMode.parallelEnabled ? 3 : 1)) break;
+        await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    if (isIntentCancelled()) return { ok: false, reason: 'intent-superseded' };
+    taskExecutionEpochs.set(taskId, executionEpoch);
+    return trackTaskIntentOperation(taskId, operation, executionEpoch);
+}
+
+function trackTaskIntentOperation(taskId, operation, executionEpoch) {
+    const records = standaloneTaskIntentPromises.get(taskId) || new Set();
+    // Reserve synchronously before the callback can issue requests or exports.
+    const pending = Promise.resolve().then(() => {
+        if (!isTaskExecutionCurrent(taskId, executionEpoch)) return { ok: false, reason: 'task-revoked' };
+        return operation();
+    }).finally(() => {
+        records.delete(pending);
+        if (!records.size) standaloneTaskIntentPromises.delete(taskId);
+        if (taskExecutionEpochs.get(taskId) === executionEpoch) taskExecutionEpochs.delete(taskId);
+        scheduleNextQueuedTask();
+    });
+    records.add(pending);
+    standaloneTaskIntentPromises.set(taskId, records);
+    return pending;
+}
+
+async function enforceSingleTaskMode() {
+    if (taskMode.parallelEnabled || !canExecuteCoordinatorWork()) return;
+    if (singleTaskModeTransition) return singleTaskModeTransition;
+    const epoch = runtimeRole.executionEpoch;
+    const occupied = getTaskOperationIds();
+    const activeTasks = currentTasks.filter(task => occupied.has(String(task.id)))
+        .sort((left, right) => (Number(left.queueOrder) || 0) - (Number(right.queueOrder) || 0));
+    const extras = activeTasks.slice(1);
+    extras.forEach(task => suspendedTaskExecutions.add(String(task.id)));
+    const settling = Promise.all(extras.map(async task => {
+        const taskId = String(task.id);
+        const hadLifecycle = runningTaskExecutions.has(taskId) || runningTaskExecutionPromises.has(taskId);
+        abortTaskRequests(taskId);
+        downloadRequestScheduler.stopTask(taskId);
+        cancelPendingTaskFinalExports(taskId);
+        const streamOutput = taskStreamWriters.has(taskId);
+        await Promise.allSettled([runningTaskExecutionPromises.get(taskId),
+            waitForStandaloneTaskRequestScopes(taskId), abortTaskStreamWriterForTask(taskId),
+            ...(typeof standaloneTaskIntentPromises !== 'undefined' ? standaloneTaskIntentPromises.get(taskId) || [] : [])]);
+        if (canExecuteCoordinatorWork(epoch) && findTaskById(taskId) && !confirmedDeletedTaskIds.has(taskId)) {
+            const queued = updateTask(taskId, current => ({ ...current,
+                status: streamOutput ? 'await_save_target' : hadLifecycle ? 'queued' : current.status,
+                downloadSpeedBytesPerSecond: 0, estimatedRemainingSeconds: 0,
+                segments: (current.segments || []).map(segment => ['downloading', 'retrying'].includes(segment.status)
+                    ? { ...segment, status: hadLifecycle ? 'idle' : 'failed', attemptCount: 0,
+                        errorMessage: hadLifecycle ? '' : '已因切换单任务模式停止，可重新重试此分片' } : segment)
+            }), { executionEpoch: epoch, allowSuspended: true });
+            if (queued) await persistCoordinatorTask(queued, epoch);
+        }
+        suspendedTaskExecutions.delete(taskId);
+    }));
+    singleTaskModeTransition = settling;
+    try { await settling; } finally { if (singleTaskModeTransition === settling) singleTaskModeTransition = null; }
+    scheduleNextQueuedTask();
 }
 
 function applyQuickDownloadFromLocation() {
@@ -1055,6 +1678,7 @@ function renderTasks() {
         restorePendingTaskSelectionFocus();
     }
     if (window.lucide) lucide.createIcons();
+    renderTaskCoordinationNotice();
     renderSegmentCacheStatusBar();
     updateAggregateDownloadStatus();
     restoreActiveTooltipSnapshot(tooltipSnapshot);
@@ -1211,29 +1835,51 @@ function getTaskListFocusKey(taskId, action) {
 function batchStartSelectedTasks() {
     const selectedTaskIdSet = new Set(getSelectedTasks().map(task => String(task.id)));
     if (selectedTaskIdSet.size === 0) return;
-    let shouldSchedule = false;
-
     selectedTaskIdSet.forEach(taskId => {
         const task = findTaskById(taskId);
         if (!task) return;
         if (task.status === 'queued') {
-            shouldSchedule = true;
+            void submitTaskAction('resume', taskId);
             return;
         }
         if (task.status === 'paused') {
-            const resumedTask = resumeTask(taskId, { schedule: false });
-            shouldSchedule = shouldSchedule || resumedTask?.status === 'queued';
+            void submitTaskAction('resume', taskId);
             return;
         }
         if (['failed', 'recoverable', 'partial_completed'].includes(task.status)) {
-            const restartedTask = restartTaskFromIncompleteSegments(taskId, { schedule: false });
-            shouldSchedule = shouldSchedule || restartedTask?.status === 'queued';
+            void submitTaskAction('retry_incomplete', taskId);
         }
     });
 
-    if (shouldSchedule) {
-        scheduleNextQueuedTask();
+}
+
+function renderTaskCoordinationNotice() {
+    if (!taskCoordinationNoticeElement) return;
+    let message = '';
+    if (runtimeRole.unsafeLegacyWriter) {
+        message = '检测到旧版本页面正在更新任务，本页下载已暂停。请刷新或关闭旧版本页面后重试';
+    } else if (!runtimeRole.coordinationAvailable) {
+        message = '任务同步暂不可用，请刷新页面后重试';
+    } else if (!runtimeRole.isCoordinator) {
+        message = '下载正在其他页面运行';
     }
+    taskCoordinationNoticeElement.textContent = message;
+    if (runtimeRole.unsafeLegacyWriter) {
+        const retryButton = document.createElement('button');
+        retryButton.type = 'button';
+        retryButton.className = 'secondary-btn task-coordination-notice__retry';
+        retryButton.textContent = '已关闭或刷新旧页面，恢复下载';
+        retryButton.addEventListener('click', async () => {
+            retryButton.disabled = true;
+            await coordinatorRoleTransition;
+            await stopLocalTaskExecutions('legacy-acknowledgement');
+            const result = await coordinatorRuntime.acknowledgeLegacyWriter();
+            if (!result.ok) showToast('任务同步暂不可用，请刷新页面后重试', { type: 'error' });
+            renderTaskCoordinationNotice();
+        });
+        taskCoordinationNoticeElement.appendChild(retryButton);
+    }
+    taskCoordinationNoticeElement.classList.toggle('hidden', !message);
 }
 
 function showTaskStatusError(taskId) {
@@ -1659,36 +2305,57 @@ function openSegmentCacheDb() {
     if (!isSegmentCacheAvailable()) {
         return Promise.resolve(null);
     }
-    if (segmentCacheDbPromise) {
-        return segmentCacheDbPromise;
-    }
-
-    segmentCacheDbPromise = new Promise(resolve => {
-        let request;
-        try {
-            request = indexedDB.open(SEGMENT_CACHE_DB_NAME, SEGMENT_CACHE_DB_VERSION);
-        } catch {
-            resolve(null);
-            return;
-        }
-
-        request.onupgradeneeded = () => {
-            const db = request.result;
-            if (!db.objectStoreNames.contains(SEGMENT_CACHE_STORE_NAME)) {
-                db.createObjectStore(SEGMENT_CACHE_STORE_NAME, { keyPath: 'id' });
-            }
-        };
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => resolve(null);
-        request.onblocked = () => resolve(null);
-    });
-
-    return segmentCacheDbPromise;
+    return globalThis.M3U8TaskCoordination.openDatabase(indexedDB).catch(() => null);
 }
 
-async function runSegmentCacheStoreOperation(mode, operation) {
+async function runFencedSegmentCacheMutation(operation, executionEpoch) {
+    if (executionEpoch == null || !canExecuteCoordinatorWork(executionEpoch)) return null;
     const db = await openSegmentCacheDb();
-    if (!db) return null;
+    if (!db || !canExecuteCoordinatorWork(executionEpoch)) return null;
+    return new Promise(resolve => {
+        let result = null;
+        let transaction;
+        try {
+            transaction = db.transaction([SEGMENT_CACHE_STORE_NAME, 'coordination-metadata'], 'readwrite');
+            transaction.oncomplete = () => resolve(canExecuteCoordinatorWork(executionEpoch) ? result : null);
+            transaction.onabort = transaction.onerror = () => resolve(null);
+            const leaseRequest = transaction.objectStore('coordination-metadata').get('coordinator');
+            leaseRequest.onerror = () => transaction.abort();
+            leaseRequest.onsuccess = () => {
+                const lease = leaseRequest.result;
+                if (!lease?.ownerPageId || lease.executionEpoch !== executionEpoch || lease.expiresAt <= Date.now()
+                    || lease.ownerPageId !== runtimeRole.ownerPageId || !canExecuteCoordinatorWork(executionEpoch)) {
+                    transaction.abort();
+                    return;
+                }
+                try {
+                    operation(transaction.objectStore(SEGMENT_CACHE_STORE_NAME), value => { result = value; }, transaction);
+                } catch {
+                    transaction.abort();
+                }
+            };
+        } catch {
+            transaction?.abort();
+            resolve(null);
+        }
+    });
+}
+
+async function runSegmentCacheStoreOperation(mode, operation, executionEpoch = null) {
+    if (typeof runtimeRole !== 'undefined') executionEpoch ??= runtimeRole.executionEpoch;
+    const canWrite = () => mode !== 'readwrite' || typeof canExecuteCoordinatorWork !== 'function'
+        || canExecuteCoordinatorWork(executionEpoch);
+    if (!canWrite()) return null;
+    if (mode === 'readwrite') {
+        return runFencedSegmentCacheMutation((store, finish, transaction) => {
+            const request = operation(store);
+            if (!request) return;
+            request.onsuccess = () => finish(request.result ?? true);
+            request.onerror = () => transaction.abort();
+        }, executionEpoch);
+    }
+    const db = await openSegmentCacheDb();
+    if (!db || !canWrite()) return null;
 
     return new Promise(resolve => {
         let request;
@@ -1705,7 +2372,7 @@ async function runSegmentCacheStoreOperation(mode, operation) {
             resolve(null);
             return;
         }
-        request.onsuccess = () => resolve(request.result ?? null);
+        request.onsuccess = () => resolve(canWrite() ? request.result ?? null : null);
         request.onerror = () => resolve(null);
     });
 }
@@ -1781,24 +2448,9 @@ async function getSegmentCacheStats() {
     };
 }
 
-async function clearSegmentCache() {
-    const db = await openSegmentCacheDb();
-    if (!db) return false;
-
-    return new Promise(resolve => {
-        let request;
-        try {
-            const transaction = db.transaction(SEGMENT_CACHE_STORE_NAME, 'readwrite');
-            const store = transaction.objectStore(SEGMENT_CACHE_STORE_NAME);
-            request = store.clear();
-        } catch {
-            resolve(false);
-            return;
-        }
-
-        request.onsuccess = () => resolve(true);
-        request.onerror = () => resolve(false);
-    });
+async function clearSegmentCache(executionEpoch = null) {
+    if (typeof runtimeRole !== 'undefined') executionEpoch ??= runtimeRole.executionEpoch;
+    return (await runSegmentCacheStoreOperation('readwrite', store => store.clear(), executionEpoch)) != null;
 }
 
 function resetTasksAfterSegmentCacheClear() {
@@ -1866,26 +2518,19 @@ function resetTasksAfterSegmentCacheClear() {
 }
 
 async function cleanupOrphanedSegmentCache() {
+    const executionEpoch = typeof runtimeRole !== 'undefined' ? runtimeRole.executionEpoch : null;
     const activeTaskIds = new Set((Array.isArray(currentTasks) ? currentTasks : []).map(task => String(task.id)));
-    const db = await openSegmentCacheDb();
-    if (!db) return { removedCount: 0, available: false };
-
-    return new Promise(resolve => {
+    const result = await runFencedSegmentCacheMutation((store, finish, transaction) => {
         let removedCount = 0;
-        let request;
-        try {
-            const transaction = db.transaction(SEGMENT_CACHE_STORE_NAME, 'readwrite');
-            const store = transaction.objectStore(SEGMENT_CACHE_STORE_NAME);
-            request = store.openCursor();
-        } catch {
-            resolve({ removedCount: 0, available: false });
-            return;
-        }
-
+        const request = store.openCursor();
         request.onsuccess = () => {
+            if (!canExecuteCoordinatorWork(executionEpoch)) {
+                transaction.abort();
+                return;
+            }
             const cursor = request.result;
             if (!cursor) {
-                resolve({ removedCount, available: true });
+                finish({ removedCount, available: true });
                 return;
             }
 
@@ -1896,8 +2541,9 @@ async function cleanupOrphanedSegmentCache() {
             }
             cursor.continue();
         };
-        request.onerror = () => resolve({ removedCount, available: false });
-    });
+        request.onerror = () => transaction.abort();
+    }, executionEpoch);
+    return result || { removedCount: 0, available: false };
 }
 
 function getSegmentCacheStatusElements() {
@@ -1960,9 +2606,9 @@ async function renderSegmentCacheStatusBar() {
 }
 
 async function handleCleanupOrphanedSegmentCache() {
-    const result = await cleanupOrphanedSegmentCache();
+    const result = await submitTaskAction('cleanup_cache', '');
     await renderSegmentCacheStatusBar();
-    if (!result.available) {
+    if (!result.ok) {
         showToast('本地缓存不可用，无法清理', { type: 'error' });
         return;
     }
@@ -1977,9 +2623,9 @@ async function handleClearSegmentCache() {
         }])
         : true;
     if (!confirmed) return;
-
-    const cleared = await clearSegmentCache();
-    const affectedTasks = cleared ? resetTasksAfterSegmentCacheClear() : false;
+    const result = await submitTaskAction('clear_cache', '');
+    const cleared = result.ok;
+    const affectedTasks = cleared;
     await renderSegmentCacheStatusBar();
     showToast(cleared
         ? (affectedTasks ? '已清空缓存，相关任务需重新下载已清空分片' : '已清空本地分片缓存')
@@ -1988,7 +2634,8 @@ async function handleClearSegmentCache() {
     });
 }
 
-function putCachedSegmentBytes(taskId, sequence, bytes) {
+function putCachedSegmentBytes(taskId, sequence, bytes, executionEpoch = null) {
+    if (typeof getTaskExecutionEpoch === 'function') executionEpoch ??= getTaskExecutionEpoch(taskId);
     if (!isSegmentCacheEnabled()) {
         return Promise.resolve(false);
     }
@@ -2009,7 +2656,7 @@ function putCachedSegmentBytes(taskId, sequence, bytes) {
         bytes,
         byteLength: bytes.byteLength,
         updatedAt: Date.now()
-    })).then(result => result != null).then(success => {
+    }), executionEpoch).then(result => result != null).then(success => {
         if (!success && !hasShownSegmentCacheWriteWarning) {
             hasShownSegmentCacheWriteWarning = true;
             if (typeof showToast === 'function') {
@@ -2123,7 +2770,8 @@ async function hydrateTaskSegmentsFromCache(task) {
     };
 }
 
-function deleteCachedSegment(taskId, sequence) {
+function deleteCachedSegment(taskId, sequence, executionEpoch = null) {
+    if (typeof getTaskExecutionEpoch === 'function') executionEpoch ??= getTaskExecutionEpoch(taskId);
     const normalizedTaskId = String(taskId || '');
     const normalizedSequence = Number(sequence);
     if (!normalizedTaskId || !Number.isFinite(normalizedSequence) || normalizedSequence <= 0) {
@@ -2132,10 +2780,11 @@ function deleteCachedSegment(taskId, sequence) {
 
     return runSegmentCacheStoreOperation('readwrite', store => (
         store.delete(getSegmentCacheKey(normalizedTaskId, normalizedSequence))
-    )).then(() => true);
+    ), executionEpoch).then(result => result != null);
 }
 
-async function deleteCachedSegmentsForTasks(taskIds) {
+async function deleteCachedSegmentsForTasks(taskIds, executionEpoch = null) {
+    if (typeof runtimeRole !== 'undefined') executionEpoch ??= runtimeRole.executionEpoch;
     const normalizedTaskIds = new Set(
         (Array.isArray(taskIds) ? taskIds : [taskIds])
             .map(taskId => String(taskId || ''))
@@ -2143,24 +2792,13 @@ async function deleteCachedSegmentsForTasks(taskIds) {
     );
     if (normalizedTaskIds.size === 0) return false;
 
-    const db = await openSegmentCacheDb();
-    if (!db) return false;
-
-    return new Promise(resolve => {
-        let request;
-        try {
-            const transaction = db.transaction(SEGMENT_CACHE_STORE_NAME, 'readwrite');
-            const store = transaction.objectStore(SEGMENT_CACHE_STORE_NAME);
-            request = store.openCursor();
-        } catch {
-            resolve(false);
-            return;
-        }
-
+    const result = await runFencedSegmentCacheMutation((store, finish, transaction) => {
+        const request = store.openCursor();
         request.onsuccess = () => {
+            if (!canExecuteCoordinatorWork(executionEpoch)) { transaction.abort(); return; }
             const cursor = request.result;
             if (!cursor) {
-                resolve(true);
+                finish(true);
                 return;
             }
             if (normalizedTaskIds.has(String(cursor.value?.taskId || ''))) {
@@ -2168,22 +2806,24 @@ async function deleteCachedSegmentsForTasks(taskIds) {
             }
             cursor.continue();
         };
-        request.onerror = () => resolve(false);
-    });
+        request.onerror = () => transaction.abort();
+    }, executionEpoch);
+    return result === true;
 }
 
-function deleteCachedSegmentsForTask(taskId) {
-    return deleteCachedSegmentsForTasks([taskId]);
+function deleteCachedSegmentsForTask(taskId, executionEpoch = null) {
+    if (typeof getTaskExecutionEpoch === 'function') executionEpoch ??= getTaskExecutionEpoch(taskId);
+    return deleteCachedSegmentsForTasks([taskId], executionEpoch);
 }
 
-async function hydrateRestoredTasksFromSegmentCache() {
+async function hydrateRestoredTasksFromSegmentCache(options = {}) {
     if (!Array.isArray(currentTasks) || currentTasks.length === 0) return;
     const hydratedTasks = await Promise.all(currentTasks.map(task => hydrateTaskSegmentsFromCache(task)));
     currentTasks = hydratedTasks;
-    if (typeof saveTasksToStorage === 'function') {
+    if (options.persist !== false && typeof saveTasksToStorage === 'function') {
         saveTasksToStorage();
     }
-    renderTasks();
+    if (options.render !== false) renderTasks();
 }
 
 async function cleanupOrphanedSegmentCacheOnStartup() {
@@ -2200,13 +2840,23 @@ function getPersistableSegmentSnapshot(segment, index) {
         if (!Number.isSafeInteger(offset) || offset < 0) return null;
         return { length, offset };
     };
+    const normalizeEncryption = (encryption) => {
+        if (!encryption || typeof encryption !== 'object') return null;
+        return {
+            method: String(encryption.method || ''),
+            keyUri: String(encryption.keyUri || ''),
+            iv: encryption.iv == null ? null : String(encryption.iv),
+            rawTag: String(encryption.rawTag || '')
+        };
+    };
     const normalizeInitSegment = (initSegment) => {
         if (!initSegment || typeof initSegment !== 'object') return null;
         const url = String(initSegment.url || '');
         if (!url) return null;
         return {
             url,
-            byteRange: normalizeByteRange(initSegment.byteRange)
+            byteRange: normalizeByteRange(initSegment.byteRange),
+            encryption: normalizeEncryption(initSegment.encryption)
         };
     };
 
@@ -2218,14 +2868,7 @@ function getPersistableSegmentSnapshot(segment, index) {
         container: String(segment?.container || 'transport-stream'),
         byteRange: normalizeByteRange(segment?.byteRange),
         initSegment: normalizeInitSegment(segment?.initSegment),
-        encryption: segment?.encryption && typeof segment.encryption === 'object'
-            ? {
-                method: String(segment.encryption.method || ''),
-                keyUri: String(segment.encryption.keyUri || ''),
-                iv: segment.encryption.iv == null ? null : String(segment.encryption.iv),
-                rawTag: String(segment.encryption.rawTag || '')
-            }
-            : null,
+        encryption: normalizeEncryption(segment?.encryption),
         status: typeof segment?.status === 'string' ? segment.status : 'idle',
         bytes: null,
         byteLength: Math.max(0, Number(segment?.byteLength) || Number(segment?.bytes?.byteLength) || 0),
@@ -2241,6 +2884,9 @@ function getPersistableTaskSnapshot(task) {
         id: String(task?.id || ''),
         title: String(task?.title || ''),
         url: String(task?.url || ''),
+        sourceUrl: String(task?.sourceUrl || task?.url || ''),
+        creationFingerprintInputs: task?.creationFingerprintInputs || null,
+        saveTargetHandle: task?.saveTargetHandle || null,
         format: task?.format === 'mp4' ? 'mp4' : 'ts',
         duration: String(task?.duration || '00:00:00'),
         streamSave: Boolean(task?.streamSave),
@@ -2270,7 +2916,9 @@ function getPersistableTaskSnapshot(task) {
                 resolutionPixels: Number(quality?.resolutionPixels) || 0,
                 bandwidthValue: Number(quality?.bandwidthValue) || 0,
                 isRecommended: Boolean(quality?.isRecommended),
-                rawTag: String(quality?.rawTag || '')
+                rawTag: String(quality?.rawTag || ''),
+                audioGroupId: String(quality?.audioGroupId || ''),
+                subtitleGroupId: String(quality?.subtitleGroupId || '')
             }))
             : [],
         selectedQualityId: typeof task?.selectedQualityId === 'string' ? task.selectedQualityId : '',
@@ -2427,15 +3075,8 @@ function loadTasksFromStorage() {
 }
 
 function saveTasksToStorage() {
-    try {
-        localStorage.setItem(TASKS_STORAGE_KEY, JSON.stringify(
-            Array.isArray(currentTasks)
-                ? currentTasks.map(task => getPersistableTaskSnapshot(task))
-                : []
-        ));
-    } catch {
-        // Ignore persistence failures in static-browser mode.
-    }
+    if (!canExecuteCoordinatorWork()) return Promise.resolve([]);
+    return Promise.all(currentTasks.map(task => persistCoordinatorTask(task)));
 }
 
 function batchPauseSelectedTasks() {
@@ -2445,13 +3086,13 @@ function batchPauseSelectedTasks() {
     selectedTaskIdSet.forEach(taskId => {
         const task = findTaskById(taskId);
         if (!task || task.status !== 'queued') return;
-        pauseTask(taskId);
+        void submitTaskAction('pause', taskId);
     });
 
     selectedTaskIdSet.forEach(taskId => {
         const task = findTaskById(taskId);
         if (!task || !['downloading', 'detecting', 'resolving'].includes(task.status)) return;
-        pauseTask(taskId);
+        void submitTaskAction('pause', taskId);
     });
 }
 
@@ -2482,9 +3123,13 @@ function buildTaskDeletionConfirmationModel(tasks) {
     const message = taskList.length === 1
         ? `确认删除任务“${taskList[0].title || '未命名任务'}”？`
         : `确认删除选中的 ${taskList.length} 个任务？`;
-    const hint = downloadingCount > 0
+    let hint = downloadingCount > 0
         ? `其中 ${downloadingCount} 个任务正在进行中，确认后会立即中止相关请求。`
         : '删除后不会保留任务记录，此操作不可撤销。';
+    if (taskList.some(task => ['file-system', 'stream-saver'].includes(task.actualWriteMode)
+        || task.segments?.some(segment => segment.streamSaved))) {
+        hint += ' 已写入的外部文件可能不完整，网页无法替你删除，请自行检查保存位置。';
+    }
 
     return {
         title,
@@ -2581,22 +3226,39 @@ function trackRemovedTaskCleanup(cleanupPromise) {
     return trackedPromise;
 }
 
-async function removeTasksById(taskIds) {
+async function removeTasksById(taskIds, executionEpoch = runtimeRole.executionEpoch) {
+    if (typeof canExecuteCoordinatorWork === 'function' && !canExecuteCoordinatorWork(executionEpoch)) return false;
     const selectedTaskIdSet = new Set((Array.isArray(taskIds) ? taskIds : [taskIds]).map(id => String(id)));
     if (selectedTaskIdSet.size === 0) return false;
 
-    if (!currentTasks.some(task => selectedTaskIdSet.has(String(task.id)))) {
-        return false;
-    }
-
-    selectedTaskIdSet.forEach(taskId => {
+    const settlementPromises = [];
+    for (const taskId of selectedTaskIdSet) {
+        const marked = await taskRepository.markTaskDeleting(taskId, executionEpoch);
+        if (!marked.ok) {
+            if (marked.reason === 'task-not-found') continue;
+            throw new Error(marked.reason);
+        }
+        confirmedDeletedTaskIds.add(taskId);
+        suspendedTaskExecutions.add(taskId);
+        coordinatorRuntime.notifyChanged();
+        const pendingWrite = typeof pendingTaskPersistence !== 'undefined' ? pendingTaskPersistence.get(taskId) : null;
+        if (pendingWrite) {
+            pendingWrite.cancelled = true;
+            pendingWrite.snapshot = null;
+            settlementPromises.push(pendingWrite.promise);
+        }
+        const exports = pendingTaskFinalExports.get(taskId);
+        if (exports) exports.forEach(record => { if (record.settlement) settlementPromises.push(record.settlement); });
+        if (typeof standaloneTaskIntentPromises !== 'undefined') {
+            settlementPromises.push(...(standaloneTaskIntentPromises.get(taskId) || []));
+        }
         if (typeof cancelPendingTaskFinalExports === 'function') {
             cancelPendingTaskFinalExports(taskId);
         }
         if (typeof revokeTaskDownloadObjectUrls === 'function') {
             revokeTaskDownloadObjectUrls(taskId);
         }
-    });
+    }
 
     if (pendingTaskSelectionFocusId) {
         const focusedTaskId = pendingTaskSelectionFocusId.replace('task-select-', '');
@@ -2605,7 +3267,6 @@ async function removeTasksById(taskIds) {
         }
     }
 
-    const settlementPromises = [];
     selectedTaskIdSet.forEach(taskId => {
         if (typeof abortTaskRequests === 'function') {
             abortTaskRequests(taskId);
@@ -2635,9 +3296,6 @@ async function removeTasksById(taskIds) {
     selectedTaskIdSet.forEach(id => {
         selectedTaskIds.delete(id);
     });
-    if (typeof saveTasksToStorage === 'function') {
-        saveTasksToStorage();
-    }
     renderTasks();
     scheduleNextQueuedTask();
 
@@ -2655,15 +3313,25 @@ async function removeTasksById(taskIds) {
             executionStore?.delete(String(taskId));
         });
         if (typeof deleteCachedSegmentsForTasks === 'function') {
-            await deleteCachedSegmentsForTasks([...selectedTaskIdSet]);
+            const cleaned = await deleteCachedSegmentsForTasks([...selectedTaskIdSet], executionEpoch);
+            if (cleaned === false) throw new Error('Segment cache cleanup did not complete');
         } else {
-            await Promise.allSettled([...selectedTaskIdSet].map(id => deleteCachedSegmentsForTask(id)));
+            await Promise.allSettled([...selectedTaskIdSet].map(id => deleteCachedSegmentsForTask(id, executionEpoch)));
         }
+        for (const taskId of selectedTaskIdSet) {
+            const removed = await taskRepository.deleteTask(taskId, executionEpoch);
+            if (!removed.ok) throw new Error(removed.reason);
+            localTaskCommitRevisions.delete(taskId);
+            taskExecutionEpochs.delete(taskId);
+            suspendedTaskExecutions.delete(taskId);
+        }
+        coordinatorRuntime.notifyChanged();
         if (typeof renderSegmentCacheStatusBar === 'function') {
             renderSegmentCacheStatusBar();
         }
     });
     trackRemovedTaskCleanup(cleanupPromise);
+    await cleanupPromise;
     return true;
 }
 
@@ -2676,7 +3344,8 @@ async function batchDeleteSelectedTasks() {
     const shouldRestoreFocusAfterDelete = activeElement instanceof HTMLElement
         && activeElement.id === 'task-list-batch-delete-btn';
 
-    if (await removeTasksById(selectedTasks.map(task => task.id)) && shouldRestoreFocusAfterDelete) {
+    const results = await Promise.all(selectedTasks.map(task => submitTaskAction('delete', task.id)));
+    if (results.every(result => result.ok) && shouldRestoreFocusAfterDelete) {
         restoreFocusAfterBatchDelete();
     }
 }
@@ -2722,6 +3391,7 @@ function getTaskStatusIcon(status) {
     if (status === 'queued') return 'filter';
     if (status === 'detecting' || status === 'resolving' || status === 'preparing') return 'search';
     if (status === 'await_variant_selection' || status === 'await_range_selection') return 'sliders-horizontal';
+    if (status === 'await_save_target') return 'folder-open';
     if (status === 'paused') return 'pause';
     if (status === 'finalizing') return 'package';
     if (status === 'completed') return 'check';
@@ -2760,11 +3430,24 @@ function createTaskStatusContent(task, statusLabel) {
 }
 
 function getTaskDisplayStatusLabel(task) {
+    if (task?.status === 'queued') {
+        const queuePosition = getQueuedTaskPosition(task);
+        return queuePosition > 0 ? `排队中 · 第 ${queuePosition} 个` : '排队中';
+    }
     if (task?.status === 'finalizing') {
         const message = String(task?.finalizingMessage || '').trim();
         if (message) return message;
     }
     return getTaskStatusLabel(task?.status);
+}
+
+function getQueuedTaskPosition(task) {
+    if (task?.status !== 'queued') return 0;
+    const queue = currentTasks.filter(candidate => candidate?.status === 'queued' && !candidate.deleting)
+        .sort((left, right) => (Number(left.queueOrder) || Number.MAX_SAFE_INTEGER) - (Number(right.queueOrder) || Number.MAX_SAFE_INTEGER)
+            || (Number(left.createdAt) || 0) - (Number(right.createdAt) || 0)
+            || String(left.id).localeCompare(String(right.id)));
+    return queue.findIndex(candidate => String(candidate.id) === String(task.id)) + 1;
 }
 
 function getTaskRangeSummaryLabel(task) {
@@ -2797,10 +3480,14 @@ function createTaskCardHTML(task) {
     const taskIdArgument = escapeHTML(JSON.stringify(String(task.id)));
     const taskSelectionControlId = escapeHTML(getTaskSelectionControlId(task.id));
     const taskUrlButtonId = escapeHTML(getTaskUrlButtonId(task.id));
-    const primaryActionLabel = getTaskPrimaryActionLabel(task.status);
+    const isQualitySelectionOnAnotherPage = task.status === 'await_variant_selection'
+        && !runtimeRole.isCoordinator;
+    const primaryActionLabel = isQualitySelectionOnAnotherPage
+        ? '请在运行页面选择清晰度'
+        : getTaskPrimaryActionLabel(task.status);
     const primaryActionIcon = ['paused', 'failed', 'recoverable', 'partial_completed'].includes(task.status)
         ? createTaskActionIcon('resume')
-        : task.status === 'await_range_selection'
+        : ['await_variant_selection', 'await_range_selection', 'await_save_target'].includes(task.status)
             ? createTaskActionIcon('play')
             : createTaskActionIcon('pause');
     const isSelected = isTaskSelected(task.id);
@@ -2854,7 +3541,7 @@ function createTaskCardHTML(task) {
         ? 'task-row__progress is-active-download'
         : 'task-row__progress';
     const primaryActionHTML = primaryActionLabel
-        ? `<button type="button" class="task-action-btn task-toggle-btn" aria-label="${primaryActionAccessibleLabel}" data-tooltip="${primaryActionTooltip}" data-tooltip-key="${primaryActionTooltipKey}" data-focus-key="${primaryActionFocusKey}" onpointerdown='handleTaskRowPrimaryActionPointerDown(event, ${taskIdArgument})' onkeydown='handleTaskRowPrimaryActionKeydown(event, ${taskIdArgument})'>${primaryActionIcon}</button>`
+        ? `<button type="button" class="task-action-btn task-toggle-btn${isQualitySelectionOnAnotherPage ? ' is-disabled' : ''}" aria-label="${primaryActionAccessibleLabel}" data-tooltip="${primaryActionTooltip}" data-tooltip-key="${primaryActionTooltipKey}" data-focus-key="${primaryActionFocusKey}" ${isQualitySelectionOnAnotherPage ? 'aria-disabled="true" ' : ''}onpointerdown='handleTaskRowPrimaryActionPointerDown(event, ${taskIdArgument})' onkeydown='handleTaskRowPrimaryActionKeydown(event, ${taskIdArgument})'>${primaryActionIcon}</button>`
         : '';
     const forceMergeActionHTML = shouldShowForceMergeAction
         ? `<button type="button" class="task-action-btn task-merge-btn${canForceMerge ? '' : ' is-disabled'}" aria-label="${canForceMerge ? mergeActionAccessibleLabel : escapeHTML(`${mergeActionTooltip}任务 ${rawTitle}`)}" data-tooltip="${escapeHTML(mergeActionTooltip)}" data-tooltip-key="${mergeActionTooltipKey}" data-focus-key="${mergeActionFocusKey}" ${canForceMerge ? '' : 'aria-disabled="true" '}onpointerdown='handleTaskRowActionPointerDown(event, ${taskIdArgument}, "merge")' onkeydown='handleTaskRowActionKeydown(event, ${taskIdArgument}, "merge")'>${createTaskActionIcon('merge')}</button>`
@@ -2928,6 +3615,7 @@ function getTaskStatusLabel(status) {
     if (status === 'resolving') return '解析中';
     if (status === 'await_variant_selection') return '待选清晰度';
     if (status === 'await_range_selection') return '待确认范围';
+    if (status === 'await_save_target') return '待选择保存位置';
     if (status === 'preparing') return '准备中';
     if (status === 'paused') return '已暂停';
     if (status === 'completed') return '已完成';
@@ -2939,7 +3627,9 @@ function getTaskStatusLabel(status) {
 }
 
 function getTaskPrimaryActionLabel(status) {
+    if (status === 'await_variant_selection') return '选择清晰度';
     if (status === 'await_range_selection') return '确认范围';
+    if (status === 'await_save_target') return '选择保存位置';
     if (['paused', 'failed', 'recoverable', 'partial_completed'].includes(status)) return '继续';
     if (status === 'paused') return '继续';
     if (status === 'completed') return '';
@@ -3307,7 +3997,7 @@ function renderTaskFragmentDetails(task) {
 
 async function handleTaskFragmentClick(taskId, sequence, status) {
     if (status === 'failed') {
-        await retryTaskSegment(taskId, sequence);
+        await submitTaskAction('retry_segment', taskId, { sequence });
         return;
     }
 
@@ -3360,28 +4050,28 @@ function handleTaskDetailSavePointerDown(event, id) {
     if (event?.pointerType === 'mouse' && event.button !== 0) return;
 
     event?.preventDefault?.();
-    reSaveCompletedTask(id);
+    return submitTaskAction('save_completed', id);
 }
 
 function handleTaskDetailSaveKeydown(event, id) {
     if (!event || (event.key !== 'Enter' && event.key !== ' ')) return;
 
     event.preventDefault();
-    reSaveCompletedTask(id);
+    return submitTaskAction('save_completed', id);
 }
 
 function handleTaskDetailRedownloadPointerDown(event, id) {
     if (event?.pointerType === 'mouse' && event.button !== 0) return;
 
     event?.preventDefault?.();
-    redownloadCompletedTask(id);
+    return submitTaskAction('redownload', id);
 }
 
 function handleTaskDetailRedownloadKeydown(event, id) {
     if (!event || (event.key !== 'Enter' && event.key !== ' ')) return;
 
     event.preventDefault();
-    redownloadCompletedTask(id);
+    return submitTaskAction('redownload', id);
 }
 
 function handleTaskDetailMergePointerDown(event, id) {
@@ -3462,11 +4152,10 @@ function runTaskRowAction(id, action) {
         return;
     }
     if (action === 'save') {
-        return reSaveCompletedTask(id);
+        return submitTaskAction('save_completed', id);
     }
     if (action === 'redownload') {
-        redownloadCompletedTask(id);
-        return;
+        return submitTaskAction('redownload', id);
     }
     if (action === 'delete') {
         deleteTask(id);
@@ -5097,8 +5786,16 @@ function buildPendingTaskTitle(url, title, overrides = {}) {
 }
 
 async function resolveNewTaskSource(taskDraft) {
+    if (typeof getTaskExecutionEpoch === 'function') {
+        taskDraft._executionEpoch ??= getTaskExecutionEpoch(taskDraft);
+        if (!canExecuteCoordinatorWork(taskDraft._executionEpoch)) {
+            throw new DOMException('Task coordinator ownership changed', 'AbortError');
+        }
+    }
     const probeTask = {
         id: `pending-task-probe-${nextPendingTaskProbeId++}`,
+        isTaskProbe: true,
+        _executionEpoch: taskDraft._executionEpoch,
         title: buildPendingTaskTitle(taskDraft.url, taskDraft.title, taskDraft),
         url: taskDraft.url,
         format: taskDraft.format,
@@ -5157,8 +5854,10 @@ function buildTaskFromResolvedDraft(taskDraft, resolvedSource, range = null) {
         && Number(range.start) > 0
         && Number(range.end) >= Number(range.start)
         && Number(range.end) <= segments.length;
-    const actualRangeStart = confirmedRange ? Number(range.start) : (segments.length > 0 ? 1 : 0);
-    const actualRangeEnd = confirmedRange ? Number(range.end) : segments.length;
+    const requestedRangeStart = taskParams.downloadRangeMode === 'custom' ? Number(taskDraft.actualRangeStart) || 0 : 0;
+    const requestedRangeEnd = taskParams.downloadRangeMode === 'custom' ? Number(taskDraft.actualRangeEnd) || 0 : 0;
+    const actualRangeStart = confirmedRange ? Number(range.start) : (requestedRangeStart || (segments.length > 0 ? 1 : 0));
+    const actualRangeEnd = confirmedRange ? Number(range.end) : (requestedRangeEnd || segments.length);
     const requestedSegmentCount = confirmedRange
         ? (actualRangeEnd - actualRangeStart + 1)
         : segments.length;
@@ -5205,15 +5904,10 @@ function buildTaskFromResolvedDraft(taskDraft, resolvedSource, range = null) {
 }
 
 function enqueueResolvedTaskDraft(taskDraft, resolvedSource, range = null) {
-    const newTask = buildTaskFromResolvedDraft(taskDraft, resolvedSource, range);
-    currentTasks.unshift(newTask);
-    selectedTaskIds.delete(newTask.id);
-    if (typeof saveTasksToStorage === 'function') {
-        saveTasksToStorage();
-    }
-    renderTasks();
-    scheduleNextQueuedTask();
-    return newTask;
+    // Shared creation always resolves its source after the durable queue write.
+    void resolvedSource;
+    void range;
+    return addNewTask(taskDraft.url, taskDraft.title, taskDraft);
 }
 
 function resetPendingRangeTaskDraft() {
@@ -5221,6 +5915,7 @@ function resetPendingRangeTaskDraft() {
 }
 
 function openPendingTaskRangeModal(taskDraft, resolvedSource) {
+    if (typeof getTaskExecutionEpoch === 'function') taskDraft._executionEpoch ??= getTaskExecutionEpoch(taskDraft);
     const draftTitle = buildPendingTaskTitle(taskDraft.url, taskDraft.title, taskDraft);
     pendingRangeTaskDraft = {
         taskDraft: {
@@ -5255,6 +5950,7 @@ function getPendingRangeTaskModalModel() {
 }
 
 function openPendingTaskQualityModal(taskDraft, qualities) {
+    if (typeof getTaskExecutionEpoch === 'function') taskDraft._executionEpoch ??= getTaskExecutionEpoch(taskDraft);
     const draftTitle = buildPendingTaskTitle(taskDraft.url, taskDraft.title, taskDraft);
     pendingTaskDraft = {
         ...taskDraft,
@@ -5327,42 +6023,25 @@ async function handleNewTaskCreate() {
     setNewTaskCreateBusy(true);
 
     try {
-        const resolvedSource = await resolveNewTaskSource(taskDraft);
-        const parsed = resolvedSource?.parsed;
-
-        if (parsed?.type === 'master') {
-            setNewTaskCreateBusy(false);
-            if (!Array.isArray(parsed.qualities) || parsed.qualities.length === 0) {
-                showToast('当前链接没有可用清晰度', { type: 'info' });
-                return;
-            }
-
-            openPendingTaskQualityModal({
-                ...taskDraft,
-                mediaRenditions: Array.isArray(parsed.mediaRenditions)
-                    ? parsed.mediaRenditions.map(rendition => ({ ...rendition }))
-                    : []
-            }, parsed.qualities);
-            return;
-        }
-
-        if (parsed?.type === 'media' && taskDraft.downloadRangeMode === 'custom') {
-            setNewTaskCreateBusy(false);
-            openPendingTaskRangeModal(taskDraft, resolvedSource);
-            return;
-        }
-
-        if (parsed?.type === 'media') {
-            enqueueResolvedTaskDraft(taskDraft, resolvedSource);
-        } else {
-            addNewTask(taskDraft.url, taskDraft.title, taskDraft);
-        }
+        const result = await submitTaskAction('create', globalThis.M3U8TaskCoordination.createTaskId(), taskDraft);
+        if (!result.ok) return;
+        clearHandledQuickDownloadParams();
         closeModal();
         resetNewTaskFormToDefaults();
     } catch (error) {
-        setNewTaskCreateBusy(false);
         showRuntimeErrorToast(error, '链接解析失败');
+    } finally {
+        setNewTaskCreateBusy(false);
     }
+}
+
+function clearHandledQuickDownloadParams() {
+    const params = new URLSearchParams(globalThis.location?.search || '');
+    if (!params.has('source')) return;
+    ['source', 'title', 'format', 'streamSave', 'range', 'concurrency', '_ignore'].forEach(key => params.delete(key));
+    const query = params.toString();
+    globalThis.history?.replaceState(globalThis.history.state, '',
+        `${globalThis.location.pathname || '/'}${query ? `?${query}` : ''}${globalThis.location.hash || ''}`);
 }
 
 function getTaskActualRange(task) {
@@ -5518,6 +6197,7 @@ function openDownloadRangeModal(taskId) {
 
     resetPendingRangeTaskDraft();
     activeRangeSelectionTaskId = String(task.id);
+    activeRangeSelectionVersion = task.version;
     pendingRangeStart = task.actualRangeStart > 0 ? String(task.actualRangeStart) : '1';
     pendingRangeEnd = task.actualRangeEnd > 0
         ? String(task.actualRangeEnd)
@@ -5526,7 +6206,7 @@ function openDownloadRangeModal(taskId) {
     openModal('download-range');
 }
 
-function confirmTaskRangeSelection() {
+async function confirmTaskRangeSelection() {
     const task = getActiveRangeSelectionModel();
     if (!task) return;
 
@@ -5559,28 +6239,8 @@ function confirmTaskRangeSelection() {
     const start = Number.parseInt(pendingRangeStart, 10);
     const end = Number.parseInt(pendingRangeEnd, 10);
 
-    if (pendingRangeTaskDraft) {
-        enqueueResolvedTaskDraft(
-            pendingRangeTaskDraft.taskDraft,
-            pendingRangeTaskDraft.resolvedSource,
-            { start, end }
-        );
-        closeModal();
-        activeRangeSelectionTaskId = null;
-        resetPendingRangeTaskDraft();
-        pendingRangeStart = '';
-        pendingRangeEnd = '';
-        resetNewTaskFormToDefaults();
-        return;
-    }
-
-    updateTask(task.id, currentTask => ({
-        ...currentTask,
-        status: 'queued',
-        actualRangeStart: start,
-        actualRangeEnd: end,
-        errorMessage: ''
-    }));
+    const result = await submitTaskAction('select_range', task.id, { start, end }, activeRangeSelectionVersion);
+    if (!result.ok && result.reason !== 'version-conflict') return;
 
     closeModal();
     activeRangeSelectionTaskId = null;
@@ -5660,12 +6320,13 @@ function updatePendingForceMergeMode() {
     renderForceMergeModalContent(findTaskById(activeForceMergeTaskId));
 }
 
-function openForceMergeModal(taskId) {
+async function openForceMergeModal(taskId) {
     const task = findTaskById(taskId);
     if (!task || !canTaskRequestForceMerge(task)) return;
 
     const shouldAutoPause = ['downloading', 'detecting', 'resolving', 'queued'].includes(task.status);
-    const mergeTask = shouldAutoPause ? pauseTask(taskId) : task;
+    if (shouldAutoPause && !(await submitTaskAction('pause', taskId)).ok) return;
+    const mergeTask = findTaskById(taskId);
     if (!mergeTask || !canTaskForceMerge(mergeTask)) return;
 
     if (shouldAutoPause) {
@@ -5684,7 +6345,7 @@ async function confirmForceMergeSelection() {
     if (!task) return;
 
     const mode = normalizeForceMergeModeForTask(task, pendingForceMergeMode);
-    await forceMergeTask(taskId, mode);
+    await submitTaskAction('force_merge', taskId, { mode });
     closeModal();
     activeForceMergeTaskId = null;
     pendingForceMergeMode = 'prefix';
@@ -6040,8 +6701,57 @@ function selectDownloadSubtitleRenditionOption(renditionId) {
     renderDownloadQualityModalContent(getPendingTaskQualityModalModel());
 }
 
+function isAutomaticQualitySelectionTask(task) {
+    return Boolean(task
+        && task.status === 'await_variant_selection'
+        && Array.isArray(task.qualities)
+        && task.qualities.length > 1);
+}
+
+function queueAutomaticQualitySelectionModal(task) {
+    if (!canExecuteCoordinatorWork() || !isAutomaticQualitySelectionTask(task)) return;
+    const taskId = String(task.id);
+    const version = Number(task.version) || 0;
+    if (automaticQualityModalShownVersions.get(taskId) === version
+        || pendingAutomaticQualityTaskIds.includes(taskId)
+        || automaticQualityModalTaskId === taskId) {
+        return;
+    }
+    pendingAutomaticQualityTaskIds.push(taskId);
+    pendingAutomaticQualityTaskIds.sort((left, right) => {
+        const leftTask = findTaskById(left);
+        const rightTask = findTaskById(right);
+        return (Number(leftTask?.queueOrder) || Number.MAX_SAFE_INTEGER)
+            - (Number(rightTask?.queueOrder) || Number.MAX_SAFE_INTEGER);
+    });
+    drainAutomaticQualitySelectionModals();
+}
+
+function queueAutomaticQualitySelectionModals() {
+    if (!canExecuteCoordinatorWork()) return;
+    currentTasks.forEach(task => queueAutomaticQualitySelectionModal(task));
+}
+
+function drainAutomaticQualitySelectionModals() {
+    if (!canExecuteCoordinatorWork() || activeModalId || pendingModalId || isModalClosing) return;
+    while (pendingAutomaticQualityTaskIds.length > 0) {
+        const taskId = pendingAutomaticQualityTaskIds.shift();
+        const task = findTaskById(taskId);
+        if (!isAutomaticQualitySelectionTask(task)) continue;
+        automaticQualityModalTaskId = taskId;
+        automaticQualityModalShownVersions.set(taskId, Number(task.version) || 0);
+        openDownloadQualityModal(taskId);
+        return;
+    }
+    automaticQualityModalTaskId = null;
+}
+
 function openDownloadQualityModal(taskId) {
-    void taskId;
+    const normalizedTaskId = String(taskId || '');
+    const queuedIndex = pendingAutomaticQualityTaskIds.indexOf(normalizedTaskId);
+    if (queuedIndex >= 0) pendingAutomaticQualityTaskIds.splice(queuedIndex, 1);
+    const task = findTaskById(taskId);
+    if (task) pendingTaskDraft = { ...task, qualities: task.qualities.map(quality => ({ ...quality })) };
 
     const modalModel = getPendingTaskQualityModalModel();
     if (!modalModel) return;
@@ -6052,7 +6762,7 @@ function openDownloadQualityModal(taskId) {
     openModal('download-quality');
 }
 
-function confirmTaskQualitySelection() {
+async function confirmTaskQualitySelection() {
     const draftTask = pendingTaskDraft;
     if (!draftTask) return;
 
@@ -6061,49 +6771,14 @@ function confirmTaskQualitySelection() {
         : null;
     if (!selectedQuality) return;
 
-    const taskDraft = {
-        ...draftTask,
-        url: selectedQuality.url,
-        selectedQualityId: selectedQuality.id,
-        selectedQualityLabel: selectedQuality.label,
-        mediaRenditions: Array.isArray(draftTask.mediaRenditions)
-            ? draftTask.mediaRenditions.map(rendition => ({ ...rendition }))
-            : [],
-        selectedAudioRenditionId: draftTask.selectedAudioRenditionId || '',
-        selectedSubtitleRenditionId: draftTask.selectedSubtitleRenditionId || '',
-        selectedOutputMode: draftTask.selectedAudioRenditionId || draftTask.selectedSubtitleRenditionId
-            ? 'separate-renditions'
-            : 'single-video',
-        actualOutputMode: ''
-    };
-
-    setNewTaskCreateBusy(true);
-    resolveNewTaskSource(taskDraft)
-        .then(resolvedSource => {
-            setNewTaskCreateBusy(false);
-            const parsed = resolvedSource?.parsed;
-            if (parsed?.type !== 'media') {
-                showToast('当前清晰度没有可用媒体分片', { type: 'error' });
-                return;
-            }
-
-            if (taskDraft.downloadRangeMode === 'custom') {
-                resetPendingTaskDraft();
-                pendingQualitySelectionId = '';
-                openPendingTaskRangeModal(taskDraft, resolvedSource);
-                return;
-            }
-
-            enqueueResolvedTaskDraft(taskDraft, resolvedSource);
-            closeModal();
-            resetPendingTaskDraft();
-            pendingQualitySelectionId = '';
-            resetNewTaskFormToDefaults();
-        })
-        .catch(error => {
-            setNewTaskCreateBusy(false);
-            showRuntimeErrorToast(error, '清晰度解析失败');
-        });
+    const result = await submitTaskAction('select_quality', draftTask.id, {
+        qualityId: selectedQuality.id,
+        audioRenditionId: draftTask.selectedAudioRenditionId || '',
+        subtitleRenditionId: draftTask.selectedSubtitleRenditionId || ''
+    }, draftTask.version);
+    if (!result.ok && result.reason !== 'version-conflict') return;
+    closeModal();
+    resetPendingTaskDraft();
 }
 
 function hasActiveBlockingTask() {
@@ -6273,8 +6948,15 @@ function setupEventListeners() {
     // Settings Save
     const saveSettingsBtn = document.getElementById('save-settings-btn');
     if (saveSettingsBtn) {
-        saveSettingsBtn.addEventListener('click', () => {
-            defaultTaskParams = getSettingsFormValues();
+        saveSettingsBtn.addEventListener('click', async () => {
+            const values = getSettingsFormValues();
+            saveSettingsBtn.disabled = true;
+            const sharedResult = await submitSharedSettings(values.parallelTaskDownloads);
+            saveSettingsBtn.disabled = false;
+            if (!sharedResult.ok) return;
+            const { parallelTaskDownloads, ...localDefaults } = values;
+            void parallelTaskDownloads;
+            defaultTaskParams = localDefaults;
             saveDefaultTaskParams(defaultTaskParams);
             applyDefaultTaskParamsToSettingsForm();
             if (!activeModalId) {
@@ -6449,6 +7131,11 @@ function finalizeModalClose() {
 
     if (nextModalId) {
         openModal(nextModalId);
+    } else if (typeof queueAutomaticQualitySelectionModals === 'function'
+        && typeof drainAutomaticQualitySelectionModals === 'function') {
+        if (typeof automaticQualityModalTaskId !== 'undefined') automaticQualityModalTaskId = null;
+        queueAutomaticQualitySelectionModals();
+        drainAutomaticQualitySelectionModals();
     }
 }
 
@@ -6550,50 +7237,7 @@ function applyQuickDownloadParamsToNewTaskForm(params) {
 }
 
 function addNewTask(url, title, overrides = {}) {
-    const taskParams = {
-        ...defaultTaskParams,
-        ...overrides
-    };
-    const taskId = Date.now().toString();
-    const now = Date.now();
-    const newTask = {
-        id: taskId,
-        title: title || applyTitleTemplate(url, taskParams.titleTemplate, taskId),
-        url,
-        format: taskParams.format,
-        duration: '00:00:00',
-        streamSave: taskParams.streamSave,
-        concurrency: taskParams.concurrency,
-        downloadRangeMode: taskParams.downloadRangeMode,
-        status: 'queued',
-        progress: 0,
-        createdAt: now,
-        updatedAt: now,
-        errorMessage: '',
-        playlistType: '',
-        segmentCount: 0,
-        requestedSegmentCount: 0,
-        segments: [],
-        qualities: [],
-        selectedQualityId: '',
-        selectedQualityLabel: '',
-        actualRangeStart: 0,
-        actualRangeEnd: 0,
-        recoveryMode: '',
-        recoveryTargetSequence: 0,
-        downloadedBytes: 0,
-        totalBytes: 0,
-        downloadSpeedBytesPerSecond: 0,
-        estimatedRemainingSeconds: 0,
-        outputFileName: ''
-    };
-    currentTasks.unshift(newTask);
-    selectedTaskIds.delete(taskId);
-    if (typeof saveTasksToStorage === 'function') {
-        saveTasksToStorage();
-    }
-    renderTasks();
-    scheduleNextQueuedTask();
+    return submitTaskAction('create', globalThis.M3U8TaskCoordination.createTaskId(), { ...overrides, url, title });
 }
 
 function findTaskById(taskId) {
@@ -6658,6 +7302,14 @@ function syncTaskRowLive(task) {
 }
 
 function updateTask(taskId, updater, options = {}) {
+    const executionEpoch = typeof getTaskExecutionEpoch === 'function'
+        ? (options.executionEpoch ?? getTaskExecutionEpoch(taskId)) : null;
+    if (typeof canExecuteCoordinatorWork === 'function'
+        && (!canExecuteCoordinatorWork(executionEpoch)
+            || confirmedDeletedTaskIds.has(String(taskId))
+            || (!options.allowSuspended && suspendedTaskExecutions.has(String(taskId))))) {
+        return findTaskById(taskId);
+    }
     let updatedTask = null;
     let didUpdate = false;
     currentTasks = currentTasks.map(task => {
@@ -6683,7 +7335,9 @@ function updateTask(taskId, updater, options = {}) {
         } else {
             renderTasks();
         }
-        if (typeof saveTasksToStorage === 'function') {
+        if (typeof persistCoordinatorTask === 'function') {
+            void persistCoordinatorTask(updatedTask, executionEpoch);
+        } else if (typeof saveTasksToStorage === 'function') {
             saveTasksToStorage();
         }
         if (typeof syncActiveTaskDetails === 'function') {
@@ -6730,6 +7384,7 @@ function releaseTaskBufferedBytes(task) {
 }
 
 function completeTask(taskId, outputFileName) {
+    const executionEpoch = typeof getTaskExecutionEpoch === 'function' ? getTaskExecutionEpoch(taskId) : null;
     const completedTask = updateTask(taskId, task => releaseTaskBufferedBytes({
         ...task,
         status: 'completed',
@@ -6744,9 +7399,12 @@ function completeTask(taskId, outputFileName) {
     }));
 
     if (completedTask) {
-        deleteCachedSegmentsForTask(taskId).then(() => {
+        const durableCompletion = typeof persistCoordinatorTask === 'function'
+            ? persistCoordinatorTask(completedTask, executionEpoch) : Promise.resolve({ ok: true });
+        durableCompletion.then(result => result.ok && (!result.value || result.value.status === 'completed')
+            ? deleteCachedSegmentsForTask(taskId, executionEpoch) : false).then(() => {
             renderSegmentCacheStatusBar();
-        });
+        }).catch(() => {});
     }
 
     return completedTask;
@@ -7060,7 +7718,18 @@ function parseM3U8Playlist(playlistText, playlistUrl) {
 
         if (line.startsWith('#EXT-X-MAP:')) {
             try {
-                activeInitSegment = parseHlsMapTag(line, playlistUrl);
+                const parsedInitSegment = parseHlsMapTag(line, playlistUrl);
+                const initEncryption = activeEncryption ? { ...activeEncryption } : null;
+                if (
+                    String(initEncryption?.method || '').toUpperCase() === 'AES-128'
+                    && !String(initEncryption?.iv || '').trim()
+                ) {
+                    throw new Error('AES-128 加密的 fMP4 初始化片段缺少 IV，无法安全解密。');
+                }
+                activeInitSegment = {
+                    ...parsedInitSegment,
+                    encryption: initEncryption
+                };
                 if (activeInitSegment.byteRange) {
                     activeInitSegment.byteRange = resolveImplicitByteRange(
                         activeInitSegment.byteRange,
@@ -7228,8 +7897,8 @@ async function detectHlsSource(task) {
             return operationResult?.value ?? operationResult;
         };
     try {
-        result = await runWithLease(task, task.url, async () => {
-            const response = await fetch(task.url);
+        result = await runWithLease(task, task.url, async signal => {
+            const response = await fetch(task.url, signal ? { signal } : undefined);
             const playlistText = await response.text();
             return {
                 value: { response, playlistText },
@@ -7525,8 +8194,11 @@ function showRuntimeErrorToast(error, fallbackMessage = '') {
 }
 
 async function downloadMediaPlaylistTask(task) {
+    const assertCurrent = typeof createTaskExecutionGuard === 'function' ? createTaskExecutionGuard(task) : () => {};
+    assertCurrent();
     setTaskStatus(task.id, 'detecting');
     const detected = await detectHlsSource(task);
+    assertCurrent();
 
     setTaskStatus(task.id, 'resolving');
     const parsed = parseM3U8Playlist(detected.playlistText, detected.playlistUrl);
@@ -7535,7 +8207,35 @@ async function downloadMediaPlaylistTask(task) {
         if (!Array.isArray(parsed.qualities) || parsed.qualities.length === 0) {
             throw new Error('当前 master playlist 没有可用清晰度');
         }
-        throw new Error(MASTER_PLAYLIST_PRESELECTION_ERROR);
+        const waiting = updateTask(task.id, current => ({ ...current,
+            status: 'await_variant_selection', playlistType: 'master',
+            qualities: parsed.qualities, mediaRenditions: parsed.mediaRenditions || [], errorMessage: ''
+        }));
+        if (typeof persistCoordinatorTask === 'function') await persistCoordinatorTask(waiting, getTaskExecutionEpoch(task));
+        assertCurrent();
+        const durableWaiting = typeof findTaskById === 'function'
+            ? (findTaskById(task.id) || waiting)
+            : waiting;
+        if (parsed.qualities.length === 1) {
+            const quality = parsed.qualities[0];
+            const selection = await applyTaskIntent({
+                type: 'select_quality',
+                taskId: task.id,
+                payload: {
+                    qualityId: quality.id,
+                    audioRenditionId: '',
+                    subtitleRenditionId: ''
+                },
+                expectedVersion: durableWaiting.version
+            }, getTaskExecutionEpoch(task));
+            if (!selection.ok) return findTaskById(task.id) || durableWaiting;
+            const selected = findTaskById(task.id) || durableWaiting;
+            return { ...selected, __qualitySelectionApplied: true };
+        }
+        if (typeof queueAutomaticQualitySelectionModal === 'function') {
+            queueAutomaticQualitySelectionModal(durableWaiting);
+        }
+        return durableWaiting;
     }
 
     if (parsed.type !== 'media' || !isPlaylistEncryptionSupported(parsed.encryption)) {
@@ -7570,6 +8270,8 @@ async function downloadMediaPlaylistTask(task) {
             errorMessage: ''
         }));
         if (typeof openDownloadRangeModal === 'function') {
+            if (typeof persistCoordinatorTask === 'function') await persistCoordinatorTask(nextTask, getTaskExecutionEpoch(task));
+            assertCurrent();
             openDownloadRangeModal(task.id);
         }
         return nextTask;
@@ -7635,15 +8337,16 @@ function clearTaskRequestControllers(taskId) {
 }
 
 function abortTaskRequests(taskId) {
-    const controllerMap = taskRequestControllers.get(String(taskId));
-    if (!controllerMap) return;
-
-    controllerMap.forEach(controller => {
-        if (controller && typeof controller.abort === 'function') {
-            controller.abort();
-        }
+    const controllerMaps = [taskRequestControllers.get(String(taskId))];
+    if (typeof standaloneTaskRequestScopes !== 'undefined') {
+        controllerMaps.push(standaloneTaskRequestScopes.get(String(taskId))?.controllers);
+    }
+    controllerMaps.forEach(controllerMap => {
+        controllerMap?.forEach(controller => {
+            if (controller && typeof controller.abort === 'function') controller.abort();
+        });
+        controllerMap?.clear();
     });
-    controllerMap.clear();
 }
 
 function canUseFileSystemStreamSave() {
@@ -7654,10 +8357,37 @@ function canUseStreamSaverStreamSave() {
     return typeof globalThis.streamSaver?.createWriteStream === 'function';
 }
 
+async function selectTaskSaveTarget(taskId) {
+    const task = findTaskById(taskId);
+    if (!task || task.status !== 'await_save_target') return;
+    const expectedVersion = task.version;
+    if (!canUseFileSystemStreamSave()) {
+        showToast('此浏览器无法共享保存位置，请在支持文件选择的下载页重试', { type: 'info' });
+        return { ok: false, reason: 'save-target-unavailable' };
+    }
+    try {
+        // Invoke the picker synchronously from the click's user activation.
+        const fileHandle = await globalThis.showSaveFilePicker({ suggestedName: buildTaskOutputFileName(task),
+            types: [{ description: 'MPEG-TS 视频', accept: { 'video/mp2t': ['.ts'] } }] });
+        if (typeof fileHandle.requestPermission === 'function'
+            && await fileHandle.requestPermission({ mode: 'readwrite' }) !== 'granted') {
+            showToast('未获得保存权限，请重新选择保存位置', { type: 'info' });
+            return { ok: false, reason: 'save-target-permission' };
+        }
+        return await submitTaskAction('select_save_target', task.id, { fileHandle }, expectedVersion);
+    } catch (error) {
+        if (error?.name !== 'AbortError') showToast('无法共享保存位置，请在下载执行页重新选择', { type: 'error' });
+        return { ok: false, reason: 'save-target-unavailable' };
+    }
+}
+
 async function createTaskStreamWriter(task) {
     if (!task?.streamSave || isFmp4Task(task)) {
         return null;
     }
+    const assertCurrent = typeof createTaskExecutionGuard === 'function' ? createTaskExecutionGuard(task) : () => {};
+    const executionEpoch = typeof getTaskExecutionEpoch === 'function' ? getTaskExecutionEpoch(task) : null;
+    assertCurrent();
 
     const taskId = String(task.id || '');
     if (taskId && taskStreamWriters.has(taskId)) {
@@ -7665,9 +8395,14 @@ async function createTaskStreamWriter(task) {
     }
 
     const outputFileName = buildTaskOutputFileName(task);
-    if (!canUseFileSystemStreamSave()) {
+    if (!task.saveTargetHandle && !canUseFileSystemStreamSave()) {
         if (!canUseStreamSaverStreamSave()) {
             return null;
+        }
+        if (typeof persistCoordinatorTask === 'function') {
+            const marked = updateTask(task.id, current => ({ ...current, actualWriteMode: 'stream-saver' }), { executionEpoch });
+            await persistCoordinatorTask(marked, executionEpoch);
+            assertCurrent();
         }
 
         const stream = globalThis.streamSaver.createWriteStream(outputFileName, {
@@ -7700,19 +8435,23 @@ async function createTaskStreamWriter(task) {
         }
         return streamWriterModel;
     }
-
-    const fileHandle = await globalThis.showSaveFilePicker({
-        suggestedName: outputFileName,
-        types: [
-            {
-                description: 'MPEG-TS 视频',
-                accept: {
-                    'video/mp2t': ['.ts']
-                }
-            }
-        ]
-    });
+    if (typeof persistCoordinatorTask === 'function') {
+        const marked = updateTask(task.id, current => ({ ...current, actualWriteMode: 'file-system' }), { executionEpoch });
+        await persistCoordinatorTask(marked, executionEpoch);
+        assertCurrent();
+    }
+    const fileHandle = task.saveTargetHandle;
+    if (!fileHandle || typeof fileHandle.createWritable !== 'function') {
+        throw new Error('请重新选择保存位置');
+    }
+    assertCurrent();
     const writable = await fileHandle.createWritable();
+    try {
+        assertCurrent();
+    } catch (error) {
+        await writable.abort?.();
+        throw error;
+    }
 
     const streamWriterModel = {
         mode: 'file-system',
@@ -7772,12 +8511,12 @@ async function downloadFmp4Part(task, part) {
         };
     let reservation = null;
     try {
-        const result = await runWithLease(task, url, async () => {
+        const result = await runWithLease(task, url, async requestSignal => {
             reservation = typeof reserveTaskDownloadMemory === 'function'
                 ? reserveTaskDownloadMemory(task, part)
                 : null;
             const response = await fetch(url, {
-                ...(controller ? { signal: controller.signal } : {}),
+                ...((controller?.signal || requestSignal) ? { signal: controller?.signal || requestSignal } : {}),
                 ...(Object.keys(headers).length > 0 ? { headers } : {})
             });
             if (!response.ok) {
@@ -7802,6 +8541,25 @@ async function downloadFmp4Part(task, part) {
                 exactByteLength: byteRange?.length || 0
             });
         });
+        const encryption = part?.encryption && typeof part.encryption === 'object'
+            ? {
+                ...part.encryption,
+                keyUri: resolveTaskDownloadResourceUrl(task, part.encryption.keyUri)
+            }
+            : null;
+        if (encryption && String(encryption.method || '').toUpperCase() !== 'NONE') {
+            if (reservation && !downloadMemoryGovernor.resize(reservation, result.bytes.byteLength * 2)) {
+                throw new Error('内存空间不足，无法安全解密当前分片。');
+            }
+            result.bytes = await decryptAes128Segment(
+                result.bytes,
+                encryption,
+                part.mediaSequence ?? part.sequence,
+                controller?.signal,
+                task
+            );
+            if (reservation) downloadMemoryGovernor.resize(reservation, result.bytes.byteLength);
+        }
         return typeof trackDownloadedBytesReservation === 'function'
             ? trackDownloadedBytesReservation(result.bytes, result.reservation)
             : result.bytes;
@@ -7828,11 +8586,12 @@ async function downloadSegment(task, segment) {
     let reservation = null;
     let bytes;
     try {
-        const result = await runWithLease(task, segmentUrl, async () => {
+        const result = await runWithLease(task, segmentUrl, async requestSignal => {
             reservation = typeof reserveTaskDownloadMemory === 'function'
                 ? reserveTaskDownloadMemory(task, segment)
                 : null;
-            const response = await fetch(segmentUrl, controller ? { signal: controller.signal } : undefined);
+            const signal = controller?.signal || requestSignal;
+            const response = await fetch(segmentUrl, signal ? { signal } : undefined);
             if (!response.ok) {
                 const error = new Error('分片下载失败：HTTP ' + response.status);
                 error.httpStatus = response.status;
@@ -7954,8 +8713,9 @@ async function fetchAes128Key(keyUri, signal) {
             void resourceUrl;
             return operation();
         };
-    const keyBytes = await runWithLease(task, normalizedKeyUri, async () => {
-        const response = await fetch(normalizedKeyUri, signal ? { signal } : undefined);
+    const keyBytes = await runWithLease(task, normalizedKeyUri, async requestSignal => {
+        const activeSignal = signal || requestSignal;
+        const response = await fetch(normalizedKeyUri, activeSignal ? { signal: activeSignal } : undefined);
         if (response.status === 401 || response.status === 403) {
             throw new Error(SOURCE_ACCESS_RESTRICTED_ERROR);
         }
@@ -8008,6 +8768,10 @@ async function decryptAes128Segment(encryptedBytes, encryption, sequence) {
 }
 
 async function downloadTaskSegments(task) {
+    const assertCurrent = typeof createTaskExecutionGuard === 'function' ? createTaskExecutionGuard(task) : () => {};
+    const executionEpoch = typeof getTaskExecutionEpoch === 'function' ? getTaskExecutionEpoch(task) : null;
+    const isCurrent = () => typeof isTaskExecutionCurrent !== 'function' || isTaskExecutionCurrent(task.id, executionEpoch);
+    assertCurrent();
     const MAX_SEGMENT_ATTEMPTS = 3;
     const taskId = task.id;
     const requestControllerStore = typeof taskRequestControllers !== 'undefined'
@@ -8080,8 +8844,10 @@ async function downloadTaskSegments(task) {
                 return Number.isFinite(sequence) && sequence >= start && sequence <= end;
             });
         })();
+    const needsStreamReplay = Boolean(task.streamSave && !isFmp4Task(task));
     const activeRecoverySegments = effectiveSegments.filter(segment => (
-        getRecoverySegmentEligibility(task, segment) && !hasCompletedSegment(segment)
+        getRecoverySegmentEligibility(task, segment)
+        && (!hasCompletedSegment(segment) || (needsStreamReplay && !segment.streamSaved))
     ));
     const totalSegments = effectiveSegments.length;
     if (totalSegments === 0 || activeRecoverySegments.length === 0) {
@@ -8135,6 +8901,7 @@ async function downloadTaskSegments(task) {
         : operation => operation();
     const streamWriter = canUseTaskStreamSave
         ? await runFileSelection(() => {
+            assertCurrent();
             const latestTaskForFileSelection = findTaskById(taskId);
             if (!latestTaskForFileSelection || latestTaskForFileSelection.status === 'paused') {
                 return null;
@@ -8142,6 +8909,10 @@ async function downloadTaskSegments(task) {
             return createTaskStreamWriter(latestTaskForFileSelection);
         })
         : null;
+    if (!isCurrent()) {
+        await streamWriter?.abort?.();
+        return findTaskById(taskId);
+    }
     const actualWriteMode = streamWriter?.mode === 'file-system'
         ? 'file-system'
         : streamWriter?.mode === 'stream-saver'
@@ -8168,6 +8939,7 @@ async function downloadTaskSegments(task) {
         task.streamSaveExternalRenditionsNotified = true;
     }
     const pendingStreamWrites = new Map();
+    const pendingReplayReservations = new Map();
     const streamedSegmentIndexes = new Set();
     const fmp4InitByteCache = new Map();
     let nextStreamWriteIndex = 0;
@@ -8180,7 +8952,8 @@ async function downloadTaskSegments(task) {
         && (
             !getSegmentEligibility(task, task.segments[nextStreamWriteIndex])
             || !getRecoverySegmentEligibility(task, task.segments[nextStreamWriteIndex])
-            || hasCompletedSegment(task.segments[nextStreamWriteIndex])
+            || (hasCompletedSegment(task.segments[nextStreamWriteIndex])
+                && (!streamWriter || task.segments[nextStreamWriteIndex].streamSaved))
         )
     ) {
         nextStreamWriteIndex += 1;
@@ -8205,19 +8978,38 @@ async function downloadTaskSegments(task) {
         let latestTask = findTaskById(taskId) || task;
         advanceStreamWriteCursor(latestTask);
         while (pendingStreamWrites.has(nextStreamWriteIndex)) {
+            assertCurrent();
+            if (streamWriterSettled || hasFailure) throw new DOMException('Stream output cancelled', 'AbortError');
             const bytes = pendingStreamWrites.get(nextStreamWriteIndex);
             pendingStreamWrites.delete(nextStreamWriteIndex);
-            await streamWriter.write(bytes);
+            const replayReservation = pendingReplayReservations.get(nextStreamWriteIndex);
+            try {
+                await streamWriter.write(bytes);
+                assertCurrent();
+                const writtenIndex = nextStreamWriteIndex;
+                updateTask(taskId, current => ({ ...current,
+                    downloadedBytes: Math.max(0, Number(current.downloadedBytes) || 0)
+                        + (current.segments[writtenIndex]?.cacheStored && !current.segments[writtenIndex]?.bytes ? bytes.byteLength : 0),
+                    segments: current.segments.map((segment, index) => index === writtenIndex
+                        ? { ...segment, streamSaved: true, byteLength: bytes.byteLength, bytes: null }
+                        : segment)
+                }), { render: 'live' });
+            } finally {
+                if (replayReservation) downloadMemoryGovernor.release(replayReservation);
+                pendingReplayReservations.delete(nextStreamWriteIndex);
+            }
             streamedSegmentIndexes.add(nextStreamWriteIndex);
             latestTask = findTaskById(taskId) || latestTask;
             advanceStreamWriteCursor(latestTask);
         }
     }
 
-    function queueStreamWrite(segmentIndex, bytes) {
+    function queueStreamWrite(segmentIndex, bytes, replayReservation = null) {
         if (!streamWriter) return Promise.resolve();
+        if (streamWriterSettled || hasFailure) return Promise.reject(new DOMException('Stream output cancelled', 'AbortError'));
 
         pendingStreamWrites.set(segmentIndex, bytes);
+        if (replayReservation) pendingReplayReservations.set(segmentIndex, replayReservation);
         streamWriteChain = streamWriteChain.then(() => flushOrderedStreamWrites());
         return streamWriteChain;
     }
@@ -8234,6 +9026,9 @@ async function downloadTaskSegments(task) {
     async function abortStreamWriter() {
         if (!streamWriter || streamWriterSettled) return;
         streamWriterSettled = true;
+        pendingStreamWrites.clear();
+        pendingReplayReservations.forEach(reservation => downloadMemoryGovernor.release(reservation));
+        pendingReplayReservations.clear();
         try {
             if (typeof streamWriter.abort === 'function') {
                 await streamWriter.abort();
@@ -8253,7 +9048,7 @@ async function downloadTaskSegments(task) {
                     segment.streamSaved
                         ? {
                             ...segment,
-                            status: 'idle',
+                            status: segment.cacheStored ? 'success' : 'idle',
                             bytes: null,
                             streamSaved: false,
                             errorMessage: ''
@@ -8281,6 +9076,7 @@ async function downloadTaskSegments(task) {
     }
 
     async function processNextSegment() {
+        if (!isCurrent()) return;
         const activeTask = findTaskById(taskId);
         if (!activeTask || hasFailure || activeTask.status === 'paused') {
             return;
@@ -8292,14 +9088,54 @@ async function downloadTaskSegments(task) {
             return;
         }
 
-        const activeSegment = activeTask.segments[currentIndex];
+        let activeSegment = activeTask.segments[currentIndex];
         if (
             !activeSegment
             || !getSegmentEligibility(activeTask, activeSegment)
             || !getRecoverySegmentEligibility(activeTask, activeSegment)
-            || hasCompletedSegment(activeSegment)
         ) {
             return processNextSegment();
+        }
+        if (hasCompletedSegment(activeSegment)) {
+            if (!streamWriter || activeSegment.streamSaved) return processNextSegment();
+            let cachedBytes = activeSegment.bytes instanceof Uint8Array ? activeSegment.bytes : null;
+            let replayReservation = null;
+            try {
+                if (!cachedBytes && activeSegment.cacheStored && typeof getCachedSegmentBytes === 'function') {
+                    if (typeof downloadMemoryGovernor !== 'undefined') {
+                        replayReservation = downloadMemoryGovernor.reserve(taskId,
+                            Math.max(MEBIBYTE, Number(activeSegment.byteLength) || 0) * 2);
+                        if (!replayReservation) throw new Error('内存空间不足，无法安全回放本地分片缓存。');
+                    }
+                    try { cachedBytes = await getCachedSegmentBytes(taskId, activeSegment.sequence); } catch { cachedBytes = null; }
+                    assertCurrent();
+                    if (replayReservation && cachedBytes instanceof Uint8Array
+                        && !downloadMemoryGovernor.resize(replayReservation, cachedBytes.byteLength * 2)) {
+                        throw new Error('内存空间不足，无法安全回放本地分片缓存。');
+                    }
+                }
+                if (cachedBytes instanceof Uint8Array) {
+                    const writing = queueStreamWrite(currentIndex, cachedBytes, replayReservation);
+                    if (pendingReplayReservations.get(currentIndex) === replayReservation) replayReservation = null;
+                    await writing;
+                    assertCurrent();
+                    return processNextSegment();
+                }
+            } catch (error) {
+                hasFailure = true;
+                await abortStreamWriter();
+                throw error;
+            } finally {
+                if (replayReservation) downloadMemoryGovernor.release(replayReservation);
+            }
+            // The metadata survived but its bytes did not. Re-enter the normal
+            // downloader for this segment instead of completing a holey file.
+            const reset = updateTask(taskId, current => ({ ...current,
+                segments: current.segments.map((segment, index) => index === currentIndex
+                    ? { ...segment, status: 'idle', cacheStored: false, streamSaved: false, bytes: null, attemptCount: 0 }
+                    : segment)
+            }));
+            activeSegment = reset.segments[currentIndex];
         }
 
         for (let attemptIndex = Number(activeSegment.attemptCount) || 0; attemptIndex < MAX_SEGMENT_ATTEMPTS; attemptIndex += 1) {
@@ -8331,6 +9167,7 @@ async function downloadTaskSegments(task) {
                 attemptInitBytes = initBytes;
                 const bytes = await downloadSegment(latestTask ?? activeTask, latestSegment ?? activeSegment, controller);
                 attemptBytes = bytes;
+                assertCurrent();
                 const downloadedAt = Date.now();
                 requestControllers.delete(currentIndex + 1);
                 await queueStreamWrite(currentIndex, bytes);
@@ -8342,14 +9179,15 @@ async function downloadTaskSegments(task) {
                         cacheStored = await putCachedSegmentBytes(
                             taskId,
                             activeSegment.sequence ?? (currentIndex + 1),
-                            bytes
+                            bytes,
+                            executionEpoch
                         );
                         if (typeof resizeDownloadedBytesReservation === 'function') {
                             resizeDownloadedBytesReservation(bytes, bytes.byteLength);
                         }
                     }
                 }
-
+                assertCurrent();
                 updateTask(taskId, currentTask => {
                     const nextSegments = currentTask.segments.map((segment, segmentIndex) => (
                         segmentIndex === currentIndex
@@ -8362,7 +9200,7 @@ async function downloadTaskSegments(task) {
                                 initBytes: cacheStored
                                     ? null
                                     : (initBytes instanceof Uint8Array ? initBytes : segment.initBytes),
-                                streamSaved: Boolean(streamWriter),
+                                streamSaved: Boolean(streamWriter && streamedSegmentIndexes.has(currentIndex)),
                                 attemptCount: Number(segment.attemptCount) || 0,
                                 errorMessage: ''
                             }
@@ -8419,6 +9257,10 @@ async function downloadTaskSegments(task) {
                 }
                 attemptBytes = null;
                 attemptInitBytes = null;
+                if (!isCurrent()) {
+                    await abortStreamWriter();
+                    return;
+                }
                 const requestControllers = getRequestControllerMap(taskId);
                 requestControllers.delete(currentIndex + 1);
 
@@ -8515,8 +9357,18 @@ async function downloadTaskSegments(task) {
         () => processNextSegment()
     );
 
-    await Promise.all(workers);
+    const workerResults = await Promise.allSettled(workers);
+    const failedWorker = workerResults.find(result => result.status === 'rejected');
+    if (failedWorker) {
+        await abortStreamWriter();
+        discardVolatileStreamSavedSegments();
+        throw failedWorker.reason;
+    }
     await streamWriteChain;
+    if (!isCurrent()) {
+        await abortStreamWriter();
+        return findTaskById(taskId);
+    }
     clearRequestControllers(taskId);
     const finalTask = findTaskById(taskId);
     if (streamWriter && finalTask?.status && !['downloading', 'paused'].includes(finalTask.status)) {
@@ -8549,8 +9401,19 @@ async function downloadTaskSegments(task) {
     }
     const latestTask = findTaskById(taskId);
     if (streamWriter && latestTask?.status === 'downloading') {
-        streamWriterSettled = true;
-        await streamWriter.close();
+        if (pendingStreamWrites.size > 0 || getEffectiveTaskSegments(latestTask).some(segment => !segment.streamSaved)) {
+            await abortStreamWriter();
+            throw new Error('文件分片未完整写入，请重新选择保存位置后继续');
+        }
+        try {
+            await streamWriter.close();
+            assertCurrent();
+            streamWriterSettled = true;
+        } catch (error) {
+            await abortStreamWriter();
+            discardVolatileStreamSavedSegments();
+            throw error;
+        }
         taskStreamWriters.delete(String(taskId));
         return completeTask(taskId, streamWriter.outputFileName);
     }
@@ -8821,6 +9684,8 @@ function revokeTaskDownloadObjectUrls(taskId) {
 }
 
 async function triggerBrowserDownload(parts, outputFileName, mimeType, taskId = '') {
+    const capturedEpoch = arguments[4] ?? (typeof getTaskExecutionEpoch === 'function' ? getTaskExecutionEpoch(taskId) : null);
+    if (taskId && typeof createTaskExecutionGuard === 'function') createTaskExecutionGuard({ id: taskId, _executionEpoch: capturedEpoch })();
     const blob = new Blob(parts, { type: mimeType });
     const objectUrl = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
@@ -8861,7 +9726,7 @@ async function triggerBrowserDownload(parts, outputFileName, mimeType, taskId = 
 }
 
 function triggerTsDownload(parts, outputFileName, taskId = '') {
-    return triggerBrowserDownload(parts, outputFileName, 'video/mp2t', taskId);
+    return triggerBrowserDownload(parts, outputFileName, 'video/mp2t', taskId, arguments[3]);
 }
 
 function transmuxTsPartsToMp4(parts) {
@@ -8950,30 +9815,34 @@ async function transmuxTsBlobPartsToMp4(parts, taskId = '') {
 }
 
 async function triggerMp4Download(parts, outputFileName, taskId = '') {
+    const executionEpoch = arguments[3] ?? (typeof getTaskExecutionEpoch === 'function' ? getTaskExecutionEpoch(taskId) : null);
     const partList = Array.isArray(parts) ? parts : [];
     const mp4Parts = partList.some(part => part instanceof Blob)
         ? await transmuxTsBlobPartsToMp4(partList, taskId)
         : transmuxTsPartsToMp4(partList);
-    return triggerBrowserDownload(mp4Parts, outputFileName, 'video/mp4', taskId);
+    return triggerBrowserDownload(mp4Parts, outputFileName, 'video/mp4', taskId, executionEpoch);
 }
 
 function triggerTaskDownload(task, parts, outputFileName) {
+    const executionEpoch = typeof getTaskExecutionEpoch === 'function' ? getTaskExecutionEpoch(task) : null;
+    if (typeof createTaskExecutionGuard === 'function') createTaskExecutionGuard(task)();
     if (isFmp4Task(task)) {
-        return triggerBrowserDownload(parts, outputFileName, 'video/mp4', task?.id);
+        return triggerBrowserDownload(parts, outputFileName, 'video/mp4', task?.id, executionEpoch);
     }
 
     if (task?.format === 'mp4') {
-        return triggerMp4Download(parts, outputFileName, task?.id);
+        return triggerMp4Download(parts, outputFileName, task?.id, executionEpoch);
     }
 
-    return triggerTsDownload(parts, outputFileName, task?.id);
+    return triggerTsDownload(parts, outputFileName, task?.id, executionEpoch);
 }
 
 async function triggerSeparateRenditionDownloads(task, outputs) {
+    const executionEpoch = typeof getTaskExecutionEpoch === 'function' ? getTaskExecutionEpoch(task) : null;
     const outputList = Array.isArray(outputs) ? outputs : [];
     for (const output of outputList) {
         if (!Array.isArray(output?.parts) || !output.fileName || !output.mimeType) continue;
-        await triggerBrowserDownload(output.parts, output.fileName, output.mimeType, task?.id);
+        await triggerBrowserDownload(output.parts, output.fileName, output.mimeType, task?.id, executionEpoch);
     }
 }
 
@@ -9156,8 +10025,8 @@ async function resolveMediaPlaylistFromUrl(url, task = null) {
         throw new Error(UNSUPPORTED_M3U8_TYPE_ERROR);
     }
 
-    const result = await withDownloadRequestLease(task, normalizedUrl, async () => {
-        const response = await fetch(normalizedUrl);
+    const result = await withDownloadRequestLease(task, normalizedUrl, async signal => {
+        const response = await fetch(normalizedUrl, signal ? { signal } : undefined);
         const playlistText = await response.text();
         return {
             value: { response, playlistText },
@@ -9251,8 +10120,8 @@ async function downloadSelectedMediaRenditions(task, options = {}) {
 
         const subtitleTexts = [];
         for (const segment of subtitlePlaylist.segments) {
-            const subtitleText = await withDownloadRequestLease(task, segment.url, async () => {
-                const response = await fetch(segment.url);
+            const subtitleText = await withDownloadRequestLease(task, segment.url, async signal => {
+                const response = await fetch(segment.url, signal ? { signal } : undefined);
                 if (!response.ok) {
                     const error = new Error('字幕下载失败：HTTP ' + response.status);
                     error.httpStatus = response.status;
@@ -9276,8 +10145,11 @@ async function downloadSelectedMediaRenditions(task, options = {}) {
 }
 
 async function reSaveCompletedTask(taskId) {
-    const task = findTaskById(taskId);
-    if (!task || task.status !== 'completed') return task;
+    const initialTask = findTaskById(taskId);
+    const executionEpoch = typeof getTaskExecutionEpoch === 'function' ? getTaskExecutionEpoch(taskId) : null;
+    if (typeof canExecuteCoordinatorWork === 'function' && !canExecuteCoordinatorWork(executionEpoch)) return { ok: false, reason: 'stale-epoch' };
+    const task = initialTask ? { ...initialTask, _executionEpoch: executionEpoch } : initialTask;
+    if (!task || task.status !== 'completed') return { ok: false, reason: 'invalid-task-state' };
 
     try {
         const orderedParts = isFmp4Task(task)
@@ -9285,7 +10157,7 @@ async function reSaveCompletedTask(taskId) {
             : getCompletedTaskExportParts(task);
         if (orderedParts.length === 0) {
             showToast('当前任务缺少可保存数据，请重新下载', { type: 'error' });
-            return task;
+            return { ok: false, reason: 'no-export-data' };
         }
 
         const runTaskFinalExport = typeof enqueueTaskFinalExport === 'function'
@@ -9301,14 +10173,14 @@ async function reSaveCompletedTask(taskId) {
             triggerTaskDownload(task, orderedParts, task.outputFileName || buildTaskOutputFileName(task))
         ));
         if (exportResult?.cancelled) {
-            return findTaskById(taskId);
+            return { ok: false, reason: 'export-cancelled' };
         }
     } catch (error) {
         showRuntimeErrorToast(error, 'MP4 不兼容，建议改用 TS');
-        return task;
+        return { ok: false, reason: 'export-failed' };
     }
     showToast('已重新触发保存', { type: 'success' });
-    return task;
+    return { ok: true, value: task };
 }
 
 function redownloadCompletedTask(taskId) {
@@ -9330,6 +10202,8 @@ function redownloadCompletedTask(taskId) {
             downloadSpeedBytesPerSecond: 0,
             estimatedRemainingSeconds: 0,
             outputFileName: '',
+            saveTargetHandle: null,
+            actualWriteMode: '',
             errorMessage: '',
             recoveryMode: '',
             recoveryTargetSequence: 0,
@@ -9358,6 +10232,8 @@ function redownloadCompletedTask(taskId) {
 }
 
 async function exportTaskAsTs(task) {
+    const assertCurrent = typeof createTaskExecutionGuard === 'function' ? createTaskExecutionGuard(task) : () => {};
+    assertCurrent();
     const segments = typeof getEffectiveTaskSegments === 'function'
         ? getEffectiveTaskSegments(task)
         : (() => {
@@ -9385,9 +10261,11 @@ async function exportTaskAsTs(task) {
                 .sort((left, right) => left.sequence - right.sequence)
                 .map(segment => segment.bytes));
 
+    assertCurrent();
     const outputFileName = buildTaskOutputFileName(task);
     try {
         await triggerTaskDownload(task, orderedParts, outputFileName);
+        assertCurrent();
     } catch (error) {
         showRuntimeErrorToast(error, 'MP4 不兼容，建议改用 TS');
         throw error;
@@ -9436,9 +10314,11 @@ async function exportTaskAsTs(task) {
                 onBeforeDownload: setFinalizingMessage
             });
             await triggerSeparateRenditionDownloads(task, extraOutputs);
+            assertCurrent();
             completeTask(task.id, outputFileName);
             showToast('当前 fMP4 音视频合成暂不支持，已分别保存；直接打开视频可能无声，需要手动加载音轨或合并后播放。', { type: 'info' });
         } catch (error) {
+            assertCurrent();
             const detail = getUserFacingErrorMessage(error, '音轨或字幕分别保存失败');
             updateTask(task.id, currentTask => ({
                 ...currentTask,
@@ -9459,9 +10339,12 @@ async function exportTaskAsTs(task) {
 }
 
 async function forceMergeTask(taskId, mode) {
+    const executionEpoch = typeof getTaskExecutionEpoch === 'function' ? getTaskExecutionEpoch(taskId) : null;
+    const isCurrent = () => typeof isTaskExecutionCurrent !== 'function' || isTaskExecutionCurrent(taskId, executionEpoch);
+    if (!isCurrent()) return { ok: false, reason: 'stale-epoch' };
     const task = findTaskById(taskId);
     if (!task || !canTaskForceMerge(task)) {
-        return task;
+        return { ok: false, reason: 'invalid-task-state' };
     }
     const requestedMode = mode === 'discrete' ? 'discrete' : 'prefix';
     const normalizedMode = typeof normalizeForceMergeModeForTask === 'function'
@@ -9478,7 +10361,7 @@ async function forceMergeTask(taskId, mode) {
 
     if (task.format === 'mp4' && normalizedMode === 'discrete') {
         showToast('离散硬拼仅支持 TS', { type: 'error' });
-        return task;
+        return { ok: false, reason: 'invalid-merge-mode' };
     }
 
     if (typeof cancelPendingTaskFinalExports === 'function') {
@@ -9513,8 +10396,9 @@ async function forceMergeTask(taskId, mode) {
         clearTaskRequestControllers(taskId);
     }
 
-    const latestTask = findTaskById(taskId);
-    if (!latestTask) return null;
+    const latestSnapshot = findTaskById(taskId);
+    if (!latestSnapshot || !isCurrent()) return { ok: false, reason: 'task-revoked' };
+    const latestTask = { ...latestSnapshot, _executionEpoch: executionEpoch };
     const {
         exportableSegments,
         missingSuccessfulBytes,
@@ -9523,13 +10407,13 @@ async function forceMergeTask(taskId, mode) {
     if (exportableSegments.length === 0) {
         showToast('当前没有可导出内容', { type: 'error' });
         scheduleNextQueuedTask();
-        return findTaskById(taskId);
+        return { ok: false, reason: 'no-export-data' };
     }
 
     if (isForceMergeExportTooShort({ durationSeconds }, normalizedMode)) {
         showToast(`连续内容过短，建议继续下载到至少 ${formatDurationFromSeconds(MIN_FORCE_MERGE_PREFIX_DURATION_SECONDS)} 后再合并`, { type: 'error' });
         scheduleNextQueuedTask();
-        return findTaskById(taskId);
+        return { ok: false, reason: 'insufficient-merge-duration' };
     }
 
     const structureValidation = validateForceMergeExportStructure(latestTask, normalizedMode, exportableSegments);
@@ -9550,14 +10434,15 @@ async function forceMergeTask(taskId, mode) {
         ));
         if (exportResult?.cancelled) {
             scheduleNextQueuedTask();
-            return findTaskById(taskId);
+            return { ok: false, reason: 'export-cancelled' };
         }
     } catch (error) {
         showRuntimeErrorToast(error, 'MP4 不兼容，建议改用 TS');
         scheduleNextQueuedTask();
-        return findTaskById(taskId);
+        return { ok: false, reason: 'export-failed' };
     }
 
+    if (!isCurrent()) return { ok: false, reason: 'task-revoked' };
     const actualRange = getTaskActualRange(latestTask);
     const updatedTask = updateTask(taskId, currentTask => ({
         ...currentTask,
@@ -9580,10 +10465,14 @@ async function forceMergeTask(taskId, mode) {
     }
 
     scheduleNextQueuedTask();
-    return updatedTask;
+    return { ok: true, value: updatedTask };
 }
 
 function scheduleNextQueuedTask() {
+    if (!runtimeRole.isCoordinator || !runtimeRole.coordinationAvailable || !sharedTaskRuntimeReady
+        || (typeof coordinatorTransitionPending !== 'undefined' && coordinatorTransitionPending)
+        || (typeof singleTaskModeTransition !== 'undefined' && singleTaskModeTransition)) return;
+    if (typeof canExecuteCoordinatorWork === 'function' && !canExecuteCoordinatorWork()) return;
     const executionStore = typeof runningTaskExecutions !== 'undefined'
         ? runningTaskExecutions
         : (globalThis.__runningTaskExecutions = globalThis.__runningTaskExecutions || new Set());
@@ -9598,19 +10487,28 @@ function scheduleNextQueuedTask() {
         }
         return;
     }
-    currentTasks
-        .filter(task => (
-            task.status === 'queued'
-            && !executionStore.has(String(task.id))
-            && !runningTaskExecutionPromises.has(String(task.id))
-        ))
-        .forEach(task => {
+    const occupiedTaskIds = getTaskOperationIds();
+    globalThis.M3U8TaskCoordination.selectRunnableTaskIds(currentTasks, {
+        parallelEnabled: taskMode.parallelEnabled, parallelLimit: 3, runningTaskIds: occupiedTaskIds
+    }).filter(taskId => !occupiedTaskIds.has(String(taskId)))
+        .forEach(selectedTaskId => {
+            const task = findTaskById(selectedTaskId);
+            if (!task || (typeof suspendedTaskExecutions !== 'undefined' && suspendedTaskExecutions.has(String(selectedTaskId)))) return;
             scheduler.startTask(task.id, task.concurrency);
             const taskId = String(task.id);
+            const executionEpoch = runtimeRole.executionEpoch;
+            taskExecutionEpochs.set(taskId, executionEpoch);
             const executionPromise = Promise.resolve()
-                .then(() => startTaskExecution(task.id))
+                .then(() => startTaskExecution(task.id, executionEpoch))
+                .catch(error => {
+                    console.error('Task execution failed', error);
+                })
                 .finally(() => {
                     runningTaskExecutionPromises.delete(taskId);
+                    if (taskExecutionEpochs.get(taskId) === executionEpoch
+                        && (typeof hasStandaloneTaskRequestScope !== 'function' || !hasStandaloneTaskRequestScope(taskId))) {
+                        taskExecutionEpochs.delete(taskId);
+                    }
                     scheduleNextQueuedTask();
                 });
             runningTaskExecutionPromises.set(taskId, executionPromise);
@@ -9669,6 +10567,8 @@ function taskHasUpgradeableInsecurePlaylistResource(task) {
     return segments.some(segment => (
         hasUpgradeableUrl(segment?.url)
         || hasUpgradeableUrl(segment?.encryption?.keyUri)
+        || hasUpgradeableUrl(segment?.initSegment?.url)
+        || hasUpgradeableUrl(segment?.initSegment?.encryption?.keyUri)
     ));
 }
 
@@ -9687,8 +10587,16 @@ function isTaskMissingRecoveryContext(task) {
     return !segments.every(segment => hasSegmentRuntimeMetadata(segment));
 }
 
-async function startTaskExecution(taskId) {
+async function startTaskExecution(taskId, executionEpoch = null) {
     const normalizedTaskId = String(taskId);
+    if (typeof canExecuteCoordinatorWork === 'function') {
+        executionEpoch ??= getTaskExecutionEpoch(taskId);
+        if (!isTaskExecutionCurrent(taskId, executionEpoch)) return null;
+        taskExecutionEpochs.set(normalizedTaskId, executionEpoch);
+    }
+    const isCurrent = () => typeof isTaskExecutionCurrent !== 'function'
+        || isTaskExecutionCurrent(taskId, executionEpoch);
+    const withEpoch = task => executionEpoch == null ? task : { ...task, _executionEpoch: executionEpoch };
     const executionStore = typeof runningTaskExecutions !== 'undefined'
         ? runningTaskExecutions
         : (globalThis.__runningTaskExecutions = globalThis.__runningTaskExecutions || new Set());
@@ -9712,19 +10620,30 @@ async function startTaskExecution(taskId) {
             return failTask(taskId, RECOVERY_CONTEXT_INCOMPLETE_ERROR);
         }
         if (!isTaskReadyForSegmentResume(initialTask)) {
-            task = await downloadMediaPlaylistTask(initialTask);
+            task = await downloadMediaPlaylistTask(withEpoch(initialTask));
+            if (task?.__qualitySelectionApplied) return findTaskById(taskId) || task;
         }
+        if (!isCurrent()) return null;
         const resolvedTask = findTaskById(taskId);
         if (resolvedTask?.status === 'failed'
             || resolvedTask?.status === 'paused'
+            || resolvedTask?.status === 'await_variant_selection'
+            || resolvedTask?.status === 'await_save_target'
             || resolvedTask?.status === 'await_range_selection') {
             return resolvedTask;
         }
         if (!resolvedTask) {
             return null;
         }
+        if (resolvedTask.streamSave && !isFmp4Task(resolvedTask)
+            && !resolvedTask.saveTargetHandle && !taskStreamWriters.has(normalizedTaskId)) {
+            const waiting = updateTask(taskId, current => ({ ...current, status: 'await_save_target' }));
+            if (typeof persistCoordinatorTask === 'function') await persistCoordinatorTask(waiting, executionEpoch);
+            return waiting;
+        }
 
-        task = await downloadTaskSegments(resolvedTask ?? task);
+        task = await downloadTaskSegments(withEpoch(resolvedTask ?? task));
+        if (!isCurrent()) return null;
         const finalTask = findTaskById(taskId);
         if (!finalTask) {
             return null;
@@ -9740,7 +10659,7 @@ async function startTaskExecution(taskId) {
         if (hasRemainingIncompleteSegments) {
             return updateTask(taskId, currentTask => ({
                 ...currentTask,
-                status: resolvedSegments.some(segment => segment.status === 'failed') ? 'failed' : currentTask.status,
+                status: resolvedSegments.some(segment => segment.status === 'failed') ? 'failed' : 'recoverable',
                 recoveryMode: '',
                 recoveryTargetSequence: 0
             }));
@@ -9757,13 +10676,17 @@ async function startTaskExecution(taskId) {
                         : queuedOperation => queuedOperation();
                     return { cancelled: false, value: await runFinalExport(operation) };
                 };
-            const exportResult = await runTaskFinalExport(taskId, () => exportTaskAsTs(finalTask ?? task));
+            const exportResult = await runTaskFinalExport(taskId, () => {
+                if (!isCurrent()) return null;
+                return exportTaskAsTs(withEpoch(finalTask ?? task));
+            });
             if (exportResult?.cancelled) {
                 return findTaskById(taskId);
             }
         }
         return findTaskById(taskId);
     } catch (error) {
+        if (!isCurrent()) return null;
         if (isUserAbortError(error)) {
             updateTask(taskId, currentTask => ({
                 ...currentTask,
@@ -9967,9 +10890,12 @@ function restartTaskFromIncompleteSegments(taskId, options = {}) {
 }
 
 async function retryTaskSegment(taskId, sequence) {
+    const executionEpoch = typeof getTaskExecutionEpoch === 'function' ? getTaskExecutionEpoch(taskId) : null;
+    const isCurrent = () => typeof isTaskExecutionCurrent !== 'function' || isTaskExecutionCurrent(taskId, executionEpoch);
+    if (!isCurrent()) return { ok: false, reason: 'task-revoked' };
     const numericSequence = Number(sequence);
     if (!Number.isFinite(numericSequence) || numericSequence <= 0) {
-        return null;
+        return { ok: false, reason: 'invalid-segment' };
     }
 
     const getSegmentEligibility = typeof isTaskSegmentWithinActualRange === 'function'
@@ -10027,14 +10953,14 @@ async function retryTaskSegment(taskId, sequence) {
     });
 
     if (!retryContext) {
-        return retryingTask;
+        return { ok: false, reason: 'segment-not-retryable' };
     }
 
     if (retryContext.errorMessage) {
         if (typeof showToast === 'function') {
             showToast(retryContext.errorMessage, { type: 'error' });
         }
-        return retryingTask;
+        return { ok: false, reason: 'missing-segment-url' };
     }
 
     const requestControllers = getTaskRequestControllerMap(taskId);
@@ -10044,8 +10970,10 @@ async function retryTaskSegment(taskId, sequence) {
         ? beginStandaloneTaskRequestScope(retryContext.taskSnapshot)
         : retryContext.taskSnapshot;
 
+    let initBytes = null;
+    let bytes = null;
     try {
-        const initBytes = retryContext.segmentSnapshot?.container === 'fmp4'
+        initBytes = retryContext.segmentSnapshot?.container === 'fmp4'
             ? await getCachedFmp4InitBytes(
                 scopedTask,
                 retryContext.segmentSnapshot,
@@ -10053,15 +10981,18 @@ async function retryTaskSegment(taskId, sequence) {
                 new Map()
             )
             : null;
-        const bytes = await downloadSegment(scopedTask, retryContext.segmentSnapshot, controller);
+        if (!isCurrent()) return { ok: false, reason: 'task-revoked' };
+        bytes = await downloadSegment(scopedTask, retryContext.segmentSnapshot, controller);
+        if (!isCurrent()) return { ok: false, reason: 'task-revoked' };
         const cacheStored = typeof putCachedSegmentBytes === 'function'
-            ? await putCachedSegmentBytes(taskId, numericSequence, bytes)
+            ? await putCachedSegmentBytes(taskId, numericSequence, bytes, executionEpoch)
             : false;
+        if (!isCurrent()) return { ok: false, reason: 'task-revoked' };
         requestControllers.delete(numericSequence);
         const latestTaskBeforeCommit = findTaskById(taskId);
         if (latestTaskBeforeCommit?.status === 'queued'
             && latestTaskBeforeCommit?.recoveryMode === 'incomplete') {
-            return latestTaskBeforeCommit;
+            return { ok: false, reason: 'retry-superseded' };
         }
         const updatedTask = updateTask(taskId, task => {
             const nextSegments = Array.isArray(task.segments)
@@ -10102,21 +11033,17 @@ async function retryTaskSegment(taskId, sequence) {
             };
         });
 
-        if (typeof releaseDownloadedBytesReservation === 'function') {
-            releaseDownloadedBytesReservation(bytes);
-            releaseDownloadedBytesReservation(initBytes);
-        }
-
         if (typeof showToast === 'function') {
             showToast(`已重试第 ${numericSequence} 片`, { type: 'info' });
         }
-        return updatedTask;
+        return { ok: true, value: updatedTask };
     } catch (error) {
         requestControllers.delete(numericSequence);
+        if (!isCurrent()) return { ok: false, reason: 'task-revoked' };
         const latestTaskBeforeFailure = findTaskById(taskId);
         if (latestTaskBeforeFailure?.status === 'queued'
             && latestTaskBeforeFailure?.recoveryMode === 'incomplete') {
-            return latestTaskBeforeFailure;
+            return { ok: false, reason: 'retry-superseded' };
         }
         const failureMessage = typeof normalizeRuntimeErrorMessage === 'function'
             ? normalizeRuntimeErrorMessage(error, '分片下载失败')
@@ -10142,8 +11069,15 @@ async function retryTaskSegment(taskId, sequence) {
         if (typeof showToast === 'function') {
             showToast(`第 ${numericSequence} 片重试失败`, { type: 'error' });
         }
-        return updatedTask;
+        return { ok: false, reason: 'segment-download-failed', value: updatedTask };
     } finally {
+        requestControllers.delete(numericSequence);
+        // Once committed, retained buffers are counted from task state and cached
+        // buffers are on disk. In either case the attempt reservations end here.
+        if (typeof releaseDownloadedBytesReservation === 'function') {
+            releaseDownloadedBytesReservation(bytes);
+            if (initBytes !== bytes) releaseDownloadedBytesReservation(initBytes);
+        }
         if (typeof endStandaloneTaskRequestScope === 'function') {
             endStandaloneTaskRequestScope(taskId);
         }
@@ -10195,7 +11129,8 @@ function getSettingsFormElements() {
         format: getRequiredElement('setting-format'),
         streamSave: getRequiredElement('setting-stream-save'),
         segmentCache: getRequiredElement('setting-segment-cache'),
-        concurrency: getRequiredElement('setting-concurrency')
+        concurrency: getRequiredElement('setting-concurrency'),
+        parallelTaskDownloads: document.getElementById('setting-parallel-task-downloads')
     };
 }
 
@@ -10215,6 +11150,7 @@ function applyDefaultTaskParamsToSettingsForm() {
     form.streamSave.checked = defaultTaskParams.streamSave;
     form.segmentCache.checked = defaultTaskParams.segmentCache !== false;
     form.concurrency.value = String(defaultTaskParams.concurrency);
+    if (form.parallelTaskDownloads) form.parallelTaskDownloads.checked = taskMode.parallelEnabled;
 }
 
 function applyDefaultTaskParamsToNewTaskForm() {
@@ -10243,8 +11179,13 @@ function getSettingsFormValues() {
         streamSave: form.streamSave.checked,
         segmentCache: form.segmentCache.checked,
         concurrency: normalizeConcurrency(form.concurrency.value),
-        downloadRangeMode: defaultTaskParams.downloadRangeMode
+        downloadRangeMode: defaultTaskParams.downloadRangeMode,
+        parallelTaskDownloads: form.parallelTaskDownloads?.checked === true
     };
+}
+
+async function submitSharedSettings(parallelTaskDownloads) {
+    return submitTaskAction('update_settings', '', { parallelTaskDownloads: parallelTaskDownloads === true });
 }
 
 function getNewTaskFormValues() {
@@ -10335,7 +11276,7 @@ async function deleteTask(id) {
     const task = findTaskById(id);
     if (!task) return false;
     if (!await confirmTaskDeletion([task])) return false;
-    return removeTasksById([id]);
+    return (await submitTaskAction('delete', id)).ok;
 }
 
 function toggleTaskPausedState(id) {
@@ -10346,18 +11287,24 @@ function toggleTaskPausedState(id) {
         openDownloadRangeModal(id);
         return;
     }
+    if (task.status === 'await_variant_selection') {
+        if (!runtimeRole.isCoordinator) {
+            showToast('请在运行页面选择清晰度', { type: 'info' });
+            return;
+        }
+        return openDownloadQualityModal(id);
+    }
+    if (task.status === 'await_save_target') return selectTaskSaveTarget(id);
 
     if (task.status === 'paused') {
-        resumeTask(id);
-        return;
+        return submitTaskAction('resume', id);
     }
 
     if (['failed', 'recoverable', 'partial_completed'].includes(task.status)) {
-        restartTaskFromIncompleteSegments(id);
-        return;
+        return submitTaskAction('retry_incomplete', id);
     }
 
-    pauseTask(id);
+    return submitTaskAction('pause', id);
 }
 
 function playTask(id) {

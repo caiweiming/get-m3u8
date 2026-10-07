@@ -7,7 +7,7 @@
     <meta name="description" content="M3U8下载是纯浏览器 HLS 下载与播放工具，支持 m3u8 在线预览播放、AES-128 解密、分片下载、TS 保存、MP4 导出、范围下载和任务恢复。">
     <meta name="keywords" content="m3u8下载,m3u8播放器,m3u8在线播放,HLS下载,HLS播放器,AES-128,TS,MP4,视频分片下载,m3u8 downloader">
     <meta name="author" content="getm3u8.com">
-    <meta name="application-version" content="v1.1.0">
+    <meta name="application-version" content="v1.2.0">
     <meta name="robots" content="index, follow">
     <meta name="theme-color" content="#26282b">
     <link rel="canonical" href="https://getm3u8.com/">
@@ -18,16 +18,16 @@
     <meta name="twitter:card" content="summary">
     <meta name="twitter:title" content="M3U8下载">
     <meta name="twitter:description" content="纯浏览器 m3u8 / HLS 下载与播放工具，支持在线播放、分片下载、解密、保存和恢复。">
-    <link rel="icon" href="favicon.svg?v=202609191657" type="image/svg+xml">
-    <link rel="stylesheet" href="style.css?v=202609191657">
+    <link rel="icon" href="favicon.svg?v=202610080110" type="image/svg+xml">
+    <link rel="stylesheet" href="style.css?v=202610080110">
     <!-- Lucide Icons (local vendor bundle) -->
-    <script src="vendor/lucide.min.js?v=202609191657"></script>
+    <script src="vendor/lucide.min.js?v=202610080110"></script>
     <!-- HLS preview runtime (local vendor bundle) -->
-    <script src="vendor/hls.min.js?v=202609191657"></script>
+    <script src="vendor/hls.min.js?v=202610080110"></script>
     <!-- TS to MP4 transmux runtime (local vendor bundle) -->
-    <script src="vendor/mux.min.js?v=202609191657"></script>
+    <script src="vendor/mux.min.js?v=202610080110"></script>
     <!-- StreamSaver fallback runtime (local vendor bundle) -->
-    <script src="vendor/streamsaver.js?v=202609191657"></script>
+    <script src="vendor/streamsaver.js?v=202610080110"></script>
 </head>
 <body>
     <div id="app-loader" class="app-loader" aria-hidden="true"></div>
@@ -48,6 +48,9 @@
                     <button id="help-btn" class="icon-btn" data-tooltip="帮助" aria-label="帮助">
                         <i data-lucide="help-circle"></i>
                     </button>
+                    <a id="legacy-version-link" href="https://old.getm3u8.com/" target="_blank" rel="noopener noreferrer" class="icon-btn" data-tooltip="打开旧版" aria-label="在新标签页打开旧版">
+                        <i data-lucide="history"></i>
+                    </a>
                     <a href="https://github.com/caiweiming/get-m3u8" target="_blank" rel="noopener noreferrer" class="icon-btn" data-tooltip="GitHub" aria-label="GitHub">
                         <i data-lucide="github"></i>
                     </a>
@@ -56,6 +59,8 @@
         </header>
 
         <main class="app-main">
+            <div id="task-coordination-notice" class="task-coordination-notice hidden" role="status" aria-live="polite"></div>
+
             <!-- Hero Section (Default State) -->
             <section id="hero-section" class="hero-section">
                 <div class="hero-actions-group">
@@ -110,6 +115,7 @@
                     <div class="download-runtime-summary__metric download-runtime-summary__metric--primary">
                         <span>总速度</span>
                         <strong id="aggregate-download-speed">0 B/s</strong>
+                        <span id="aggregate-task-mode" class="download-runtime-summary__mode">单任务模式</span>
                     </div>
                     <div class="download-runtime-summary__metric download-runtime-summary__metric--secondary download-runtime-summary__metric--active">
                         <span>活动任务</span>
@@ -140,7 +146,7 @@
         </main>
 
         <footer class="app-footer">
-            <p>© 2026 M3U8下载. All rights reserved. <span class="app-footer__separator" aria-hidden="true">·</span> <span class="app-version">v1.1.0</span></p>
+            <p>© 2026 M3U8下载. All rights reserved. <span class="app-footer__separator" aria-hidden="true">·</span> <span class="app-version">v1.2.0</span></p>
         </footer>
 
         <!-- Modals -->
@@ -420,6 +426,14 @@
                         <label for="setting-concurrency">默认并发数</label>
                         <input type="number" id="setting-concurrency" value="4" min="1" max="8">
                     </div>
+                    <div class="form-item">
+                        <label for="setting-parallel-task-downloads">任务运行模式</label>
+                        <label class="form-checkbox" for="setting-parallel-task-downloads">
+                            <input type="checkbox" id="setting-parallel-task-downloads">
+                            <span>允许多个任务同时下载</span>
+                        </label>
+                        <p class="form-help">会提高浏览器的网络、存储和设备资源占用。</p>
+                    </div>
                 </div>
                 <div class="modal-footer">
                     <button class="secondary-btn close-modal-btn">取消</button>
@@ -510,6 +524,7 @@
         </div>
         <div id="app-tooltip" class="app-tooltip" aria-hidden="true"></div>
     </div>
-    <script src="app.js?v=202609191657"></script>
+    <script src="task-coordination.js?v=202610080110"></script>
+    <script src="app.js?v=202610080110"></script>
 </body>
 </html>

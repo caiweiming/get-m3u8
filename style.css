@@ -196,6 +196,22 @@ body.modal-open {
     stroke-width: 2px;
 }
 
+@media (max-width: 420px) {
+    .header-content {
+        gap: 0.5rem;
+    }
+
+    .header-actions {
+        flex: 0 0 auto;
+        gap: 0.25rem;
+    }
+
+    .header-actions .icon-btn {
+        width: 30px;
+        height: 30px;
+    }
+}
+
 /* Main Content */
 .app-main {
     flex: 1;
@@ -487,6 +503,18 @@ body.modal-open {
     font-weight: 750;
 }
 
+.download-runtime-summary__mode {
+    min-width: 0;
+    padding: 0.12rem 0.4rem;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-control);
+    color: var(--text-main);
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.15;
+    white-space: nowrap;
+}
+
 .download-runtime-summary__metric--requests {
     gap: 0.65rem;
 }
@@ -525,6 +553,36 @@ body.modal-open {
     background: rgba(38, 40, 43, 0.025);
     color: var(--text-muted);
     font-size: 0.8125rem;
+}
+
+.task-coordination-notice {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    min-height: 2.25rem;
+    margin: 1rem 0 0;
+    padding: 0.45rem 0.75rem;
+    border: 1px solid rgba(38, 40, 43, 0.1);
+    border-radius: var(--radius-control);
+    background: rgba(38, 40, 43, 0.025);
+    color: var(--text-muted);
+    font-size: 0.8125rem;
+    line-height: 1.35;
+}
+
+.task-coordination-notice:not(.hidden) ~ .tasks-section {
+    margin-top: 1rem;
+}
+
+.task-coordination-notice__retry {
+    margin-left: auto;
+    font-size: inherit;
+}
+
+[data-theme="dark"] .task-coordination-notice {
+    border-color: rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.035);
 }
 
 [data-theme="dark"] .task-cache-status-bar {
