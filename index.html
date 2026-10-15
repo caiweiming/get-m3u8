@@ -7,7 +7,7 @@
     <meta name="description" content="M3U8下载是纯浏览器 HLS 下载与播放工具，支持 m3u8 在线预览、AES-128 解密、TS 分片下载、范围下载和页面内任务控制。">
     <meta name="keywords" content="m3u8下载,m3u8播放器,m3u8在线播放,HLS下载,HLS播放器,AES-128,TS,视频分片下载,m3u8 downloader">
     <meta name="author" content="getm3u8.com">
-    <meta name="application-version" content="v1.2.1">
+    <meta name="application-version" content="v1.2.2">
     <meta name="robots" content="index, follow">
     <meta name="theme-color" content="#26282b">
     <link rel="canonical" href="https://getm3u8.com/">
@@ -18,14 +18,14 @@
     <meta name="twitter:card" content="summary">
     <meta name="twitter:title" content="M3U8下载">
     <meta name="twitter:description" content="纯浏览器 m3u8 / HLS 下载与播放工具，支持在线播放、分片下载、解密、保存和恢复。">
-    <link rel="icon" href="favicon.svg?v=202610150001" type="image/svg+xml">
-    <link rel="stylesheet" href="style.css?v=202610150001">
+    <link rel="icon" href="favicon.svg?v=202610150005" type="image/svg+xml">
+    <link rel="stylesheet" href="style.css?v=202610150005">
     <!-- Lucide Icons (local vendor bundle) -->
-    <script src="vendor/lucide.min.js?v=202610150001"></script>
+    <script src="vendor/lucide.min.js?v=202610150005"></script>
     <!-- HLS preview runtime (local vendor bundle) -->
-    <script src="vendor/hls.min.js?v=202610150001"></script>
+    <script src="vendor/hls.min.js?v=202610150005"></script>
     <!-- TS to MP4 transmux runtime (local vendor bundle) -->
-    <script src="vendor/mux.min.js?v=202610150001"></script>
+    <script src="vendor/mux.min.js?v=202610150005"></script>
 </head>
 <body>
     <div id="app-loader" class="app-loader" aria-hidden="true"></div>
@@ -112,7 +112,7 @@
         </main>
 
         <footer class="app-footer">
-            <p>© 2026 M3U8下载. All rights reserved. <span class="app-footer__separator" aria-hidden="true">·</span> <span class="app-version">v1.2.1</span></p>
+            <p>© 2026 M3U8下载. All rights reserved. <span class="app-footer__separator" aria-hidden="true">·</span> <span class="app-version">v1.2.2</span></p>
         </footer>
 
         <!-- Modals -->
@@ -224,7 +224,7 @@
                             <div id="download-subtitle-rendition-list" class="download-rendition-list" role="radiogroup" aria-label="下载字幕列表"></div>
                         </section>
                     </section>
-                    <p id="download-rendition-output-hint" class="download-rendition-output-hint hidden">已选择外部音轨或字幕，将分别保存多个文件；直接打开视频可能无声，需要手动加载音轨或合并后播放。</p>
+                    <p id="download-rendition-output-hint" class="download-rendition-output-hint hidden">已选择外部音轨或字幕，将分别保存多个文件；浏览器可能会请求权限，请选择允许多个文件下载。直接打开视频可能无声，需要手动加载音轨或合并后播放。</p>
                 </div>
                 <div class="modal-footer">
                     <button class="secondary-btn close-modal-btn">取消</button>
@@ -473,6 +473,6 @@
         </div>
         <div id="app-tooltip" class="app-tooltip" aria-hidden="true"></div>
     </div>
-    <script src="app.js?v=202610150001"></script>
+    <script src="app.js?v=202610150005"></script>
 </body>
 </html>

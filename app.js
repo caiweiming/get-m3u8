@@ -453,6 +453,7 @@ function normalizeStableTaskDraft(draft, experimental = false) {
         format: 'ts',
         streamSave: false,
         selectedAudioRenditionId: '',
+        selectedAudioCodecFamily: '',
         selectedSubtitleRenditionId: ''
     };
 }
@@ -518,7 +519,7 @@ function loadExperimentalRuntime() {
     if (experimentalRuntimePromise) return experimentalRuntimePromise;
     experimentalRuntimePromise = new Promise(resolve => {
         const script = document.createElement('script');
-        script.src = 'vendor/streamsaver.js?v=202610140006';
+        script.src = 'vendor/streamsaver.js?v=202610150005';
         script.onload = () => {
             if (globalThis.streamSaver) globalThis.streamSaver.mitm = 'vendor/streamsaver-mitm.html';
             resolve(Boolean(globalThis.streamSaver?.createWriteStream));
@@ -554,6 +555,67 @@ function chooseQuickDownloadParams(encodedParams, unencodedParams, search) {
     if (!encodedParams?.source) return unencodedParams;
     if (!unencodedParams?.source) return encodedParams;
     return shouldUseUnencodedQuickDownloadSource(search) ? unencodedParams : encodedParams;
+}
+
+function getPreservedQuickDownloadOuterEntries(search) {
+    const query = trimSearchPrefix(search);
+    if (!query) return [];
+
+    let entries;
+    if (shouldUseUnencodedQuickDownloadSource(search)) {
+        const sourceValueIndex = findQuickDownloadSourceValueIndex(query);
+        const sourceKeyIndex = Math.max(0, sourceValueIndex - 'source='.length);
+        entries = Array.from(new URLSearchParams(query.slice(0, sourceKeyIndex)).entries());
+    } else {
+        entries = Array.from(new URLSearchParams(query).entries());
+    }
+
+    return entries.filter(([key]) => key !== 'source' && !QUICK_DOWNLOAD_PARAM_NAMES.has(key));
+}
+
+function buildCanonicalQuickDownloadUrl(params, search = globalThis.location?.search || '') {
+    if (!params?.source) return '';
+
+    const canonicalParams = new URLSearchParams();
+    getPreservedQuickDownloadOuterEntries(search).forEach(([key, value]) => {
+        canonicalParams.append(key, value);
+    });
+    canonicalParams.set('source', params.source);
+    if (typeof params.title === 'string' && params.title.trim()) {
+        canonicalParams.set('title', params.title.trim());
+    }
+    canonicalParams.set('format', params.format || defaultTaskParams.format);
+    canonicalParams.set(
+        'streamSave',
+        String(typeof params.streamSave === 'boolean' ? params.streamSave : defaultTaskParams.streamSave)
+    );
+    canonicalParams.set('range', params.range || defaultTaskParams.downloadRangeMode);
+    canonicalParams.set(
+        'concurrency',
+        String(typeof params.concurrency === 'number' ? params.concurrency : defaultTaskParams.concurrency)
+    );
+    if (Array.isArray(params.ignore) && params.ignore.length > 0) {
+        canonicalParams.set('_ignore', params.ignore.join(','));
+    }
+
+    const locationApi = globalThis.location || window.location;
+    const pathname = locationApi?.pathname || '/';
+    const hash = locationApi?.hash || '';
+    const query = canonicalParams.toString();
+    return `${pathname}${query ? `?${query}` : ''}${hash}`;
+}
+
+function canonicalizeQuickDownloadLocation(params, search = globalThis.location?.search || '') {
+    const nextUrl = buildCanonicalQuickDownloadUrl(params, search);
+    if (!nextUrl) return false;
+
+    const historyApi = globalThis.history || window.history;
+    const locationApi = globalThis.location || window.location;
+    if (!historyApi?.replaceState || !locationApi) return false;
+    const currentUrl = `${locationApi.pathname || '/'}${locationApi.search || ''}${locationApi.hash || ''}`;
+    if (currentUrl === nextUrl) return false;
+    historyApi.replaceState(historyApi.state, '', nextUrl);
+    return true;
 }
 
 function parseEncodedQuickDownloadParams(search) {
@@ -988,12 +1050,30 @@ async function applyTaskAction(action) {
         } else if (action.type === 'select_quality' && durable.status === 'await_variant_selection') {
             const quality = durable.qualities.find(item => String(item.id) === String(payload.qualityId));
             if (!quality) return { ok: false, reason: 'invalid-quality', taskId };
+            const qualityBinding = resolveVideoRepresentationBinding(
+                quality,
+                experimentalMode ? payload.audioRenditionId : '',
+                experimentalMode ? payload.subtitleRenditionId : '',
+                durable.mediaRenditions
+            );
+            if (!qualityBinding) {
+                showToast('所选视频、音轨和字幕无法组成同一 HLS 组合，请重新选择。', { type: 'error' });
+                return { ok: false, reason: 'incompatible-renditions', taskId };
+            }
             patch = {
-                url: quality.url,
+                url: qualityBinding.url,
                 playlistType: '',
                 selectedQualityId: quality.id,
                 selectedQualityLabel: quality.label,
                 selectedAudioRenditionId: experimentalMode ? (payload.audioRenditionId || '') : '',
+                selectedAudioCodecFamily: experimentalMode && payload.audioRenditionId
+                    ? getAudioCodecFamily(
+                        qualityBinding.codecs,
+                        durable.mediaRenditions.find(rendition => (
+                            String(rendition?.id || '') === String(payload.audioRenditionId)
+                        ))?.channels
+                    )
+                    : '',
                 selectedSubtitleRenditionId: experimentalMode ? (payload.subtitleRenditionId || '') : '',
                 selectedOutputMode: experimentalMode && (payload.audioRenditionId || payload.subtitleRenditionId)
                     ? 'separate-renditions'
@@ -1015,13 +1095,20 @@ async function applyTaskAction(action) {
         } else {
             return { ok: false, reason: 'version-conflict', taskId };
         }
-        const updated = updateTask(taskId, task => ({
-            ...task,
-            ...patch,
-            status: 'queued',
-            errorMessage: '',
-            version: Math.max(1, Number(task.version) || 1) + 1
-        }));
+        const updated = updateTask(taskId, task => {
+            const nextTask = {
+                ...task,
+                ...patch,
+                status: 'queued',
+                errorMessage: '',
+                version: Math.max(1, Number(task.version) || 1) + 1
+            };
+            if (action.type === 'select_quality') {
+                nextTask.outputTracks = createTaskOutputTracks(nextTask);
+                nextTask.activeOutputTrackKind = 'video';
+            }
+            return nextTask;
+        });
         const result = await acceptMemoryTask(updated);
         renderTasks();
         scheduleNextQueuedTask();
@@ -1086,8 +1173,10 @@ function trackPageTaskOperation(taskId, operation, runToken) {
 }
 
 function applyQuickDownloadFromLocation() {
-    const params = parseQuickDownloadParams(globalThis.location?.search || '');
+    const search = globalThis.location?.search || '';
+    const params = parseQuickDownloadParams(search);
     if (!params?.source) return false;
+    canonicalizeQuickDownloadLocation(params, search);
     if (activeModalId || pendingModalId) return false;
 
     shouldSkipModalFallbackFocus = true;
@@ -2078,7 +2167,7 @@ function getTaskDisplayErrorMessage(task) {
 
 function getTaskDisplayErrorInfo(task) {
     const rawMessage = getTaskRawErrorMessage(task);
-    return getRuntimeErrorInfo(rawMessage, '下载失败');
+    return getRuntimeErrorInfo(rawMessage, rawMessage ? '下载失败' : '');
 }
 
 function getTaskStatusIcon(status) {
@@ -2106,10 +2195,13 @@ function createTaskStatusTextNode(text) {
 
 function createTaskStatusContent(task, statusLabel) {
     const safeLabel = escapeHTML(statusLabel);
-    if (task?.status === 'downloading' || task?.status === 'finalizing') {
+    if (task?.status === 'downloading') {
         const speedLabel = formatDownloadSpeed(task?.downloadSpeedBytesPerSecond, task?.status);
         const displayLabel = speedLabel && speedLabel !== '--' ? speedLabel : statusLabel;
         return `<i class="task-row__status-spinner" aria-hidden="true"></i>${escapeHTML(displayLabel)}`;
+    }
+    if (task?.status === 'finalizing') {
+        return `<i class="task-row__status-spinner" aria-hidden="true"></i>${safeLabel}`;
     }
 
     const errorInfo = getTaskDisplayErrorInfo(task);
@@ -2129,6 +2221,10 @@ function getTaskDisplayStatusLabel(task) {
         return queuePosition > 0 ? `排队中 · 第 ${queuePosition} 个` : '排队中';
     }
     if (task?.status === 'finalizing') {
+        const outputStageLabel = typeof getTaskOutputStageLabel === 'function'
+            ? getTaskOutputStageLabel(task)
+            : '';
+        if (outputStageLabel) return outputStageLabel;
         const message = String(task?.finalizingMessage || '').trim();
         if (message) return message;
     }
@@ -2164,7 +2260,7 @@ function hasCompletedTaskExportData(task) {
 
 function createTaskCardHTML(task) {
     const rawTitle = task.title || '未命名任务';
-    const progress = normalizeTaskProgress(task.progress);
+    const progress = normalizeTaskProgress(getTaskActiveStageProgress(task).progress);
     const format = escapeHTML(task.format || DEFAULT_TASK_PARAMS.format);
     const duration = escapeHTML(task.duration || '00:00:00');
     const status = escapeHTML(task.status || 'downloading');
@@ -2340,6 +2436,208 @@ function normalizeTaskProgress(value) {
     const numericValue = Number(value);
     if (!Number.isFinite(numericValue)) return 0;
     return Math.min(100, Math.max(0, Math.round(numericValue)));
+}
+
+function createTaskOutputTracks(task) {
+    const segments = Array.isArray(task?.segments) ? task.segments : [];
+    const renditions = Array.isArray(task?.mediaRenditions) ? task.mediaRenditions : [];
+    const selectedAudioId = String(task?.selectedAudioRenditionId || '');
+    const selectedSubtitleId = String(task?.selectedSubtitleRenditionId || '');
+    const selectedAudio = renditions.find(rendition => String(rendition?.id || '') === selectedAudioId);
+    const selectedSubtitle = renditions.find(rendition => String(rendition?.id || '') === selectedSubtitleId);
+    const createTrack = (kind, selected, rendition = null) => ({
+        kind,
+        selected,
+        status: selected ? 'waiting' : 'not_selected',
+        label: kind === 'video'
+            ? '视频'
+            : String(rendition?.name || rendition?.language || (kind === 'audio' ? '音轨' : '字幕')),
+        language: String(rendition?.language || ''),
+        audioCodecFamily: kind === 'audio'
+            ? String(task?.selectedAudioCodecFamily || rendition?.audioCodecFamily || '')
+            : '',
+        completedSegments: 0,
+        totalSegments: kind === 'video' ? segments.length : 0,
+        failedSegments: 0,
+        downloadedBytes: 0,
+        speed: 0,
+        eta: 0,
+        fileName: '',
+        errorMessage: ''
+    });
+
+    return {
+        video: createTrack('video', true),
+        audio: createTrack('audio', Boolean(selectedAudioId), selectedAudio),
+        subtitle: createTrack('subtitle', Boolean(selectedSubtitleId), selectedSubtitle)
+    };
+}
+
+function updateTaskOutputTrack(taskId, kind, patch, options = {}) {
+    const normalizedKind = String(kind || '');
+    if (!['video', 'audio', 'subtitle'].includes(normalizedKind)) return findTaskById(taskId);
+    return updateTask(taskId, task => {
+        const outputTracks = task.outputTracks || createTaskOutputTracks(task);
+        const currentTrack = outputTracks[normalizedKind] || {
+            kind: normalizedKind,
+            selected: true,
+            status: 'waiting'
+        };
+        return {
+            ...task,
+            activeOutputTrackKind: options.activate === false
+                ? task.activeOutputTrackKind
+                : normalizedKind,
+            outputTracks: {
+                ...outputTracks,
+                [normalizedKind]: {
+                    ...currentTrack,
+                    ...(patch || {})
+                }
+            }
+        };
+    }, options);
+}
+
+function getTaskActiveStageProgress(task) {
+    const requestedKind = String(task?.activeOutputTrackKind || '');
+    const activeKind = ['video', 'audio', 'subtitle'].includes(requestedKind)
+        ? requestedKind
+        : 'video';
+    const track = task?.outputTracks?.[activeKind];
+    if (
+        ['finalizing', 'paused', 'partial_completed'].includes(task?.status)
+        && activeKind !== 'video'
+        && track?.selected
+    ) {
+        const completedSegments = Math.max(0, Number(track.completedSegments) || 0);
+        const totalSegments = Math.max(0, Number(track.totalSegments) || 0);
+        const progress = totalSegments > 0
+            ? normalizeTaskProgress((completedSegments / totalSegments) * 100)
+            : (track.status === 'save_triggered' ? 100 : 0);
+        const showNetworkEstimate = activeKind === 'audio' && track.status === 'downloading';
+        return {
+            kind: activeKind,
+            status: String(track.status || 'waiting'),
+            completedSegments,
+            totalSegments,
+            progress,
+            speed: showNetworkEstimate ? Math.max(0, Number(track.speed) || 0) : 0,
+            eta: showNetworkEstimate ? Math.max(0, Number(track.eta) || 0) : 0
+        };
+    }
+
+    const segments = Array.isArray(task?.segments) ? task.segments : [];
+    const completedSegments = segments.filter(segment => (
+        segment?.status === 'success'
+        && (segment?.bytes instanceof Uint8Array || segment?.streamSaved === true)
+    )).length;
+    const totalSegments = segments.length;
+    return {
+        kind: 'video',
+        status: String(task?.status || ''),
+        completedSegments,
+        totalSegments,
+        progress: normalizeTaskProgress(task?.progress),
+        speed: Math.max(0, Number(task?.downloadSpeedBytesPerSecond) || 0),
+        eta: Math.max(0, Number(task?.estimatedRemainingSeconds) || 0)
+    };
+}
+
+function getTaskOutputStageLabel(task) {
+    const stage = getTaskActiveStageProgress(task);
+    if (task?.status !== 'finalizing') return '';
+    const trackName = stage.kind === 'audio' ? '音轨' : stage.kind === 'subtitle' ? '字幕' : '视频';
+    const track = task?.outputTracks?.[stage.kind];
+    const progressLabel = stage.totalSegments > 0
+        ? `${stage.completedSegments}/${stage.totalSegments}（${stage.progress}%）`
+        : '';
+    let activeLabel = '';
+    if (stage.status === 'downloading') activeLabel = `下载${trackName}${progressLabel ? ` ${progressLabel}` : ''}`;
+    else if (stage.status === 'assembling') activeLabel = `生成${trackName}文件`;
+    else if (stage.status === 'save_triggered') activeLabel = `${trackName}已触发保存`;
+    else if (stage.status === 'paused') activeLabel = `${trackName}已暂停`;
+    else if (stage.status === 'failed') activeLabel = `${trackName}下载失败`;
+    else activeLabel = `准备${trackName}`;
+
+    const completedPrefix = stage.kind === 'audio' && task?.outputTracks?.video?.status === 'save_triggered'
+        ? '视频已完成'
+        : stage.kind === 'subtitle' && task?.outputTracks?.audio?.status === 'save_triggered'
+            ? '音轨已触发保存'
+            : '';
+    return completedPrefix ? `${completedPrefix} · ${activeLabel}` : activeLabel;
+}
+
+function renderTaskOutputTrackProgress(task) {
+    const tracks = task?.outputTracks || createTaskOutputTracks(task);
+    const trackOrder = ['video', 'audio', 'subtitle'];
+    const getTrackTypeLabel = kind => kind === 'audio' ? '音轨' : kind === 'subtitle' ? '字幕' : '视频';
+    const getTrackView = kind => {
+        const track = tracks[kind] || { kind, selected: false, status: 'not_selected' };
+        if (kind !== 'video') return track;
+
+        const segments = typeof getEffectiveTaskSegments === 'function'
+            ? getEffectiveTaskSegments(task)
+            : (Array.isArray(task?.segments) ? task.segments : []);
+        if (segments.length === 0) return track;
+
+        let status = String(track.status || 'waiting');
+        if (!['save_triggered', 'assembling'].includes(status)) {
+            if (task?.status === 'downloading') status = 'downloading';
+            else if (task?.status === 'paused') status = 'paused';
+            else if (['failed', 'recoverable'].includes(task?.status)) status = 'failed';
+        }
+        return {
+            ...track,
+            status,
+            completedSegments: segments.filter(segment => segment?.status === 'success').length,
+            totalSegments: segments.length,
+            downloadedBytes: Math.max(0, Number(task?.downloadedBytes) || 0)
+        };
+    };
+    const getTrackStatusLabel = track => {
+        if (!track?.selected || track.status === 'not_selected') return '未选择';
+        if (track.status === 'save_triggered') return '已触发保存';
+        if (track.status === 'assembling') return '正在生成文件';
+        if (track.status === 'paused') return '已暂停';
+        if (track.status === 'failed') return '失败';
+        if (track.status === 'downloading') return '下载中';
+        return '等待中';
+    };
+    const rows = trackOrder.map(kind => {
+        const track = getTrackView(kind);
+        const completed = Math.max(0, Number(track.completedSegments) || 0);
+        const total = Math.max(0, Number(track.totalSegments) || 0);
+        const progress = total > 0 ? normalizeTaskProgress((completed / total) * 100) : (track.status === 'save_triggered' ? 100 : 0);
+        const detailParts = [];
+        if (track.selected && total > 0) detailParts.push(`${completed}/${total}（${progress}%）`);
+        if (track.selected && Number(track.downloadedBytes) > 0) detailParts.push(formatStorageBytes(track.downloadedBytes));
+        if (kind === 'audio' && track.status === 'downloading' && Number(track.speed) > 0) {
+            detailParts.push(formatDownloadSpeed(track.speed, 'downloading'));
+            if (Number(track.eta) > 0) detailParts.push(`剩余 ${formatEstimatedRemainingSeconds(track.eta, 'downloading')}`);
+        }
+        if (track.errorMessage) detailParts.push(String(track.errorMessage));
+        const displayName = track.label && track.label !== getTrackTypeLabel(kind)
+            ? `${getTrackTypeLabel(kind)} · ${track.label}`
+            : getTrackTypeLabel(kind);
+        return `
+            <div class="task-fragment-detail__track" data-output-track-kind="${escapeHTML(kind)}" data-output-track-status="${escapeHTML(track.status || 'not_selected')}">
+                <div class="task-fragment-detail__track-heading">
+                    <span class="task-fragment-detail__track-name">${escapeHTML(displayName)}</span>
+                    <span class="task-fragment-detail__track-status">${escapeHTML(getTrackStatusLabel(track))}</span>
+                </div>
+                <div class="task-fragment-detail__track-progress" aria-hidden="true"><span style="width: ${progress}%;"></span></div>
+                <div class="task-fragment-detail__track-meta">${escapeHTML(detailParts.join(' · ') || '—')}</div>
+            </div>
+        `;
+    }).join('');
+
+    return `
+        <section class="task-fragment-detail__tracks" aria-label="轨道进度">
+            <h4 class="task-fragment-detail__section-title">轨道进度</h4>
+            <div class="task-fragment-detail__track-list">${rows}</div>
+        </section>
+    `;
 }
 
 function hasDownloadedSegmentBytes(segment) {
@@ -2551,6 +2849,7 @@ function renderTaskFragmentDetails(task) {
         ...safeTask,
         segments: runtimeSegments
     });
+    const activeStageProgress = getTaskActiveStageProgress(safeTask);
     const titleBadges = [
         `<span class="task-fragment-detail__title-badge">${escapeHTML((safeTask.format || DEFAULT_TASK_PARAMS.format).toUpperCase())}</span>`,
         safeTask.downloadRangeMode === 'custom' && safeTask.actualRangeStart > 0 && safeTask.actualRangeEnd > 0
@@ -2653,8 +2952,8 @@ function renderTaskFragmentDetails(task) {
                     <dd data-fragment-metric="errors">${summary.errors}</dd>
                 </div>
                 <div class="task-fragment-detail__metric">
-                    <dt>总进度</dt>
-                    <dd data-fragment-metric="progress">${summary.progress}%</dd>
+                    <dt>当前阶段</dt>
+                    <dd data-fragment-metric="progress">${activeStageProgress.progress}%</dd>
                 </div>
                 <div class="task-fragment-detail__metric">
                     <dt>时长</dt>
@@ -2673,6 +2972,7 @@ function renderTaskFragmentDetails(task) {
                     <dd data-fragment-metric="eta">${escapeHTML(formatEstimatedRemainingSeconds(safeTask.estimatedRemainingSeconds, safeTask.status))}</dd>
                 </div>
             </dl>
+            ${renderTaskOutputTrackProgress(safeTask)}
             <details class="task-fragment-detail__diagnostics">
                 <summary class="task-fragment-detail__diagnostics-summary">诊断信息</summary>
                 <div class="task-fragment-detail__diagnostics-body">
@@ -2946,11 +3246,12 @@ function updateTaskFragmentDetailsLive(task, detailContent) {
         return false;
     }
 
+    const activeStageProgress = getTaskActiveStageProgress(safeTask);
     const metricValues = {
         total: String(summary.total),
         downloaded: String(summary.downloaded),
         errors: String(summary.errors),
-        progress: `${summary.progress}%`,
+        progress: `${activeStageProgress.progress}%`,
         duration: safeTask.duration || '00:00:00',
         speed: formatDownloadSpeed(safeTask.downloadSpeedBytesPerSecond, safeTask.status),
         downloadedBytes: formatStorageBytes(safeTask.downloadedBytes),
@@ -2962,6 +3263,14 @@ function updateTaskFragmentDetailsLive(task, detailContent) {
             metricEl.textContent = value;
         }
     });
+    const trackProgress = detailContent.querySelector('.task-fragment-detail__tracks');
+    if (trackProgress) {
+        trackProgress.outerHTML = renderTaskOutputTrackProgress(safeTask);
+    }
+    const diagnosticsBody = detailContent.querySelector('.task-fragment-detail__diagnostics-body');
+    if (diagnosticsBody) {
+        diagnosticsBody.innerHTML = renderTaskRequestContext(safeTask, summary);
+    }
     if (!syncTaskFragmentDetailActions(safeTask, detailContent)) {
         return false;
     }
@@ -3007,11 +3316,16 @@ function syncActiveTaskDetails() {
     const fragmentGridScrollTop = fragmentGridScroll instanceof HTMLElement
         ? fragmentGridScroll.scrollTop
         : 0;
+    const diagnosticsWasOpen = detailContent.querySelector('.task-fragment-detail__diagnostics')?.open === true;
 
     detailContent.innerHTML = renderTaskFragmentDetails(task);
     const nextFragmentGridScroll = detailContent.querySelector('.task-fragment-grid-scroll');
     if (nextFragmentGridScroll instanceof HTMLElement) {
         nextFragmentGridScroll.scrollTop = fragmentGridScrollTop;
+    }
+    const nextDiagnostics = detailContent.querySelector('.task-fragment-detail__diagnostics');
+    if (diagnosticsWasOpen && nextDiagnostics) {
+        nextDiagnostics.open = true;
     }
     if (window.lucide) lucide.createIcons();
 }
@@ -4561,6 +4875,12 @@ function buildTaskFromResolvedDraft(taskDraft, resolvedSource, range = null) {
         ? (actualRangeEnd - actualRangeStart + 1)
         : segments.length;
     const title = taskDraft.title || applyTitleTemplate(taskDraft.url, taskParams.titleTemplate, taskId);
+    const mediaRenditions = Array.isArray(taskDraft.mediaRenditions)
+        ? taskDraft.mediaRenditions.map(rendition => ({ ...rendition }))
+        : (Array.isArray(parsed.mediaRenditions) ? parsed.mediaRenditions.map(rendition => ({ ...rendition })) : []);
+    const selectedAudioRenditionId = taskDraft.selectedAudioRenditionId || '';
+    const selectedAudioCodecFamily = taskDraft.selectedAudioCodecFamily || '';
+    const selectedSubtitleRenditionId = taskDraft.selectedSubtitleRenditionId || '';
     return {
         id: taskId,
         title,
@@ -4584,11 +4904,19 @@ function buildTaskFromResolvedDraft(taskDraft, resolvedSource, range = null) {
         qualities: Array.isArray(taskDraft.qualities) ? taskDraft.qualities.map(quality => ({ ...quality })) : [],
         selectedQualityId: taskDraft.selectedQualityId || '',
         selectedQualityLabel: taskDraft.selectedQualityLabel || '',
-        mediaRenditions: Array.isArray(taskDraft.mediaRenditions)
-            ? taskDraft.mediaRenditions.map(rendition => ({ ...rendition }))
-            : (Array.isArray(parsed.mediaRenditions) ? parsed.mediaRenditions.map(rendition => ({ ...rendition })) : []),
-        selectedAudioRenditionId: taskDraft.selectedAudioRenditionId || '',
-        selectedSubtitleRenditionId: taskDraft.selectedSubtitleRenditionId || '',
+        mediaRenditions,
+        selectedAudioRenditionId,
+        selectedAudioCodecFamily,
+        selectedSubtitleRenditionId,
+        outputTracks: createTaskOutputTracks({
+            title,
+            segments,
+            mediaRenditions,
+            selectedAudioRenditionId,
+            selectedAudioCodecFamily,
+            selectedSubtitleRenditionId
+        }),
+        activeOutputTrackKind: 'video',
         selectedOutputMode: experimentalMode ? (taskDraft.selectedOutputMode || '') : 'single-video',
         actualOutputMode: experimentalMode ? (taskDraft.actualOutputMode || '') : '',
         actualRangeStart,
@@ -4727,7 +5055,18 @@ async function handleNewTaskCreate() {
     try {
         const result = await submitTaskAction('create', createTaskId(), taskDraft);
         if (!result.ok) return;
-        clearHandledQuickDownloadParams();
+        const currentQuickParams = parseQuickDownloadParams(globalThis.location?.search || '');
+        if (currentQuickParams?.source) {
+            canonicalizeQuickDownloadLocation({
+                ...currentQuickParams,
+                source: taskDraft.url,
+                title: taskDraft.title,
+                format: taskDraft.format,
+                streamSave: taskDraft.streamSave,
+                range: taskDraft.downloadRangeMode,
+                concurrency: taskDraft.concurrency
+            });
+        }
         closeModal();
         resetNewTaskFormToDefaults();
     } catch (error) {
@@ -4735,15 +5074,6 @@ async function handleNewTaskCreate() {
     } finally {
         setNewTaskCreateBusy(false);
     }
-}
-
-function clearHandledQuickDownloadParams() {
-    const params = new URLSearchParams(globalThis.location?.search || '');
-    if (!params.has('source')) return;
-    ['source', 'title', 'format', 'streamSave', 'range', 'concurrency', '_ignore'].forEach(key => params.delete(key));
-    const query = params.toString();
-    globalThis.history?.replaceState(globalThis.history.state, '',
-        `${globalThis.location.pathname || '/'}${query ? `?${query}` : ''}${globalThis.location.hash || ''}`);
 }
 
 function getTaskActualRange(task) {
@@ -5034,6 +5364,9 @@ async function confirmForceMergeSelection() {
 }
 
 function getMatchingMediaRenditions(quality, mediaRenditions) {
+    if (Array.isArray(quality?.variantBindings) && typeof getCompatibleMediaRenditions === 'function') {
+        return getCompatibleMediaRenditions(quality, mediaRenditions);
+    }
     const renditions = Array.isArray(mediaRenditions) ? mediaRenditions : [];
     const audioGroupId = String(quality?.audioGroupId || '').trim();
     const subtitleGroupId = String(quality?.subtitleGroupId || '').trim();
@@ -5056,6 +5389,121 @@ function getMatchingMediaRenditions(quality, mediaRenditions) {
     };
 }
 
+function getVideoCodecFamily(codecs) {
+    const token = String(codecs || '')
+        .split(',')
+        .map(value => value.trim().toLowerCase())
+        .find(value => /^(?:avc1|avc3|hvc1|hev1|dvh1|dvhe|av01|vp09)\b/.test(value));
+    return token ? token.split('.')[0] : '';
+}
+
+function getAudioCodecFamily(codecs, channels = '') {
+    const normalizedCodecs = String(codecs || '').toLowerCase();
+    const normalizedChannels = String(channels || '').toLowerCase();
+    if (normalizedCodecs.includes('ec-3') || normalizedCodecs.includes('eac3')) {
+        return normalizedChannels.includes('joc') ? 'atmos' : 'eac3';
+    }
+    if (normalizedCodecs.includes('ac-3')) return 'ac3';
+    if (normalizedCodecs.includes('mp4a')) return 'aac';
+    return '';
+}
+
+function groupMasterPlaylistVideoRepresentations(qualities) {
+    const sourceQualities = Array.isArray(qualities) ? qualities : [];
+    const grouped = new Map();
+
+    sourceQualities.forEach((quality, index) => {
+        const url = String(quality?.url || '').trim();
+        const resolution = String(quality?.resolution || '').trim().toLowerCase();
+        const frameRate = String(quality?.frameRate || '').trim().toLowerCase();
+        const videoCodec = getVideoCodecFamily(quality?.codecs);
+        const key = [url, resolution, frameRate, videoCodec].join('|') || `quality-${index + 1}`;
+        const existing = grouped.get(key);
+        if (existing) {
+            existing.variantBindings.push({ ...quality });
+            return;
+        }
+        grouped.set(key, {
+            ...quality,
+            variantBindings: [{ ...quality }]
+        });
+    });
+
+    return [...grouped.values()].map(representation => {
+        const preferredBinding = representation.variantBindings.find(binding => (
+            getAudioCodecFamily(binding?.codecs) === 'aac'
+        )) || representation.variantBindings[0];
+        return {
+            ...preferredBinding,
+            id: representation.id,
+            variantBindings: representation.variantBindings.map(binding => ({ ...binding }))
+        };
+    });
+}
+
+function getCompatibleMediaRenditions(representation, mediaRenditions) {
+    const renditions = Array.isArray(mediaRenditions) ? mediaRenditions : [];
+    const bindings = Array.isArray(representation?.variantBindings) && representation.variantBindings.length > 0
+        ? representation.variantBindings
+        : [representation].filter(Boolean);
+    const audioGroups = new Map();
+    const subtitleGroups = new Set();
+
+    bindings.forEach(binding => {
+        const audioGroupId = String(binding?.audioGroupId || '').trim();
+        const subtitleGroupId = String(binding?.subtitleGroupId || '').trim();
+        if (audioGroupId && !audioGroups.has(audioGroupId)) {
+            audioGroups.set(audioGroupId, getAudioCodecFamily(binding?.codecs));
+        }
+        if (subtitleGroupId) subtitleGroups.add(subtitleGroupId);
+    });
+
+    const seenAudioIds = new Set();
+    const seenSubtitleIds = new Set();
+    const audio = [];
+    const subtitles = [];
+    renditions.forEach(rendition => {
+        if (!rendition?.downloadable) return;
+        const renditionId = String(rendition?.id || '');
+        const groupId = String(rendition?.groupId || '').trim();
+        const type = String(rendition?.type || '').toUpperCase();
+        if (type === 'AUDIO' && audioGroups.has(groupId) && !seenAudioIds.has(renditionId)) {
+            seenAudioIds.add(renditionId);
+            audio.push({
+                ...rendition,
+                audioCodecFamily: getAudioCodecFamily('', rendition?.channels) || audioGroups.get(groupId)
+            });
+        }
+        if (type === 'SUBTITLES' && subtitleGroups.has(groupId) && !seenSubtitleIds.has(renditionId)) {
+            seenSubtitleIds.add(renditionId);
+            subtitles.push({ ...rendition });
+        }
+    });
+
+    return { audio, subtitles };
+}
+
+function resolveVideoRepresentationBinding(representation, audioRenditionId, subtitleRenditionId, mediaRenditions) {
+    const bindings = Array.isArray(representation?.variantBindings) && representation.variantBindings.length > 0
+        ? representation.variantBindings
+        : [representation].filter(Boolean);
+    const renditions = Array.isArray(mediaRenditions) ? mediaRenditions : [];
+    const selectedAudioId = String(audioRenditionId || '');
+    const selectedSubtitleId = String(subtitleRenditionId || '');
+    const selectedAudio = selectedAudioId
+        ? renditions.find(rendition => String(rendition?.id || '') === selectedAudioId && rendition?.downloadable)
+        : null;
+    const selectedSubtitle = selectedSubtitleId
+        ? renditions.find(rendition => String(rendition?.id || '') === selectedSubtitleId && rendition?.downloadable)
+        : null;
+    if ((selectedAudioId && !selectedAudio) || (selectedSubtitleId && !selectedSubtitle)) return null;
+
+    return bindings.find(binding => (
+        (!selectedAudio || String(binding?.audioGroupId || '') === String(selectedAudio.groupId || ''))
+        && (!selectedSubtitle || String(binding?.subtitleGroupId || '') === String(selectedSubtitle.groupId || ''))
+    )) || null;
+}
+
 function getDefaultAudioRenditionId(renditions) {
     const candidates = Array.isArray(renditions) ? renditions : [];
     if (candidates.length === 0) return '';
@@ -5073,7 +5521,10 @@ function getDefaultAudioRenditionId(renditions) {
         ));
     };
 
-    const preferred = candidates.find(rendition => rendition?.default && !isAudioDescription(rendition))
+    const isPreferredAac = rendition => String(rendition?.audioCodecFamily || '').toLowerCase() === 'aac';
+    const preferred = candidates.find(rendition => rendition?.default && isPreferredAac(rendition) && !isAudioDescription(rendition))
+        || candidates.find(rendition => isPreferredAac(rendition) && !isAudioDescription(rendition))
+        || candidates.find(rendition => rendition?.default && !isAudioDescription(rendition))
         || candidates.find(rendition => !isAudioDescription(rendition))
         || candidates.find(rendition => rendition?.default)
         || candidates[0];
@@ -5081,9 +5532,25 @@ function getDefaultAudioRenditionId(renditions) {
 }
 
 function getRenditionOptionMeta(rendition, fallback) {
+    const codecFamily = String(rendition?.audioCodecFamily || '').toLowerCase();
+    const codecLabel = codecFamily === 'aac'
+        ? 'AAC'
+        : codecFamily === 'atmos'
+            ? 'Atmos（兼容性有限）'
+            : codecFamily === 'eac3'
+                ? 'E-AC-3（兼容性有限）'
+                : codecFamily === 'ac3'
+                    ? 'AC-3（兼容性有限）'
+                    : '';
+    const isAudioDescription = /audio description|descriptive|public\.accessibility\.describes-video/i.test([
+        rendition?.name,
+        rendition?.rawTag
+    ].map(value => String(value || '')).join(' '));
     return [
         rendition?.language,
+        codecLabel,
         rendition?.channels,
+        isAudioDescription ? '音频描述' : '',
         rendition?.forced ? '强制字幕' : ''
     ].map(value => String(value || '').trim()).filter(Boolean).join(' / ') || fallback;
 }
@@ -5925,7 +6392,7 @@ function syncTaskRowLive(task) {
     const taskRow = taskListContainer.querySelector(`.task-row[data-task-id="${taskId}"]`);
     if (!taskRow) return false;
 
-    const progress = normalizeTaskProgress(task.progress);
+    const progress = normalizeTaskProgress(getTaskActiveStageProgress(task).progress);
     const progressNode = taskRow.querySelector('.task-row__progress');
     const progressBar = taskRow.querySelector('.task-row__progress-bar');
     const progressText = taskRow.querySelector('.task-row__progress-text');
@@ -5946,7 +6413,9 @@ function syncTaskRowLive(task) {
         const statusLabel = getTaskDisplayStatusLabel(task);
         statusNode.dataset.status = status;
         if (status === 'downloading' || status === 'finalizing') {
-            const speedLabel = formatDownloadSpeed(task.downloadSpeedBytesPerSecond, status);
+            const speedLabel = status === 'downloading'
+                ? formatDownloadSpeed(task.downloadSpeedBytesPerSecond, status)
+                : '';
             const displayLabel = speedLabel && speedLabel !== '--' ? speedLabel : statusLabel;
             const spinnerNode = statusNode.querySelector('.task-row__status-spinner');
             if (spinnerNode) {
@@ -5998,7 +6467,7 @@ function updateTask(taskId, updater, options = {}) {
     });
 
     if (didUpdate) {
-        if (options.render === 'live') {
+        if (options.render === 'live' && typeof syncTaskRowLive === 'function') {
             syncTaskRowLive(updatedTask);
         } else {
             renderTasks();
@@ -6413,6 +6882,7 @@ function parseM3U8Playlist(playlistText, playlistUrl) {
                 const subtitleGroupId = String(attributes.SUBTITLES || '').trim();
                 const closedCaptionsGroupId = String(attributes['CLOSED-CAPTIONS'] || '').trim();
                 const codecs = String(attributes.CODECS || '').trim();
+                const frameRate = String(attributes['FRAME-RATE'] || '').trim();
                 qualities.push({
                     id: `quality-${qualities.length + 1}`,
                     url: resolvePlaylistResourceUrl(nextLine, playlistUrl),
@@ -6431,6 +6901,7 @@ function parseM3U8Playlist(playlistText, playlistUrl) {
                     subtitleGroupId,
                     closedCaptionsGroupId,
                     codecs,
+                    frameRate,
                     rawTag: line
                 });
             }
@@ -6510,10 +6981,13 @@ function parseM3U8Playlist(playlistText, playlistUrl) {
     }
 
     if (qualities.length > 0) {
-        const recommendedQualityId = resolveRecommendedQualityId(qualities);
+        const videoRepresentations = typeof groupMasterPlaylistVideoRepresentations === 'function'
+            ? groupMasterPlaylistVideoRepresentations(qualities)
+            : qualities;
+        const recommendedQualityId = resolveRecommendedQualityId(videoRepresentations);
         return {
             type: 'master',
-            qualities: qualities.map(quality => ({
+            qualities: videoRepresentations.map(quality => ({
                 ...quality,
                 isRecommended: quality.id === recommendedQualityId
             })),
@@ -8107,7 +8581,37 @@ function getTaskOutputExtension(task) {
 }
 
 function buildTaskOutputFileName(task) {
+    if (task?.selectedAudioRenditionId || task?.selectedSubtitleRenditionId) {
+        return buildRenditionOutputFileName(task, null, 'video');
+    }
     return `${getTaskOutputBaseName(task)}.${getTaskOutputExtension(task)}`;
+}
+
+function buildRenditionOutputFileName(task, rendition, kind) {
+    const baseName = getTaskOutputBaseName(task);
+    const normalizedKind = String(kind || '').toLowerCase();
+    const normalizePart = (value, fallback) => {
+        const normalized = String(value || '')
+            .trim()
+            .toLowerCase()
+            .replace(/_/g, '-')
+            .replace(/[^a-z0-9-]+/g, '-')
+            .replace(/^-+|-+$/g, '');
+        return normalized || fallback;
+    };
+    if (normalizedKind === 'audio') {
+        const language = normalizePart(rendition?.language, 'und');
+        const codecFamily = normalizePart(
+            task?.selectedAudioCodecFamily || rendition?.audioCodecFamily,
+            'audio'
+        );
+        return `${baseName}.audio.${language}.${codecFamily}.m4a`;
+    }
+    if (normalizedKind === 'subtitle') {
+        const language = normalizePart(rendition?.language, 'und');
+        return `${baseName}.subtitles.${language}.vtt`;
+    }
+    return `${baseName}.video.${getTaskOutputExtension(task)}`;
 }
 
 function buildForceMergeOutputFileName(task, mode) {
@@ -8482,6 +8986,16 @@ async function triggerSeparateRenditionDownloads(task, outputs) {
     }
 }
 
+function releaseRenditionOutputParts(outputs) {
+    (Array.isArray(outputs) ? outputs : []).forEach(output => {
+        (Array.isArray(output?.parts) ? output.parts : []).forEach(part => {
+            if (part instanceof Uint8Array && typeof releaseDownloadedBytesReservation === 'function') {
+                releaseDownloadedBytesReservation(part);
+            }
+        });
+    });
+}
+
 async function getTaskExportParts(task) {
     const segments = typeof getEffectiveTaskSegments === 'function'
         ? getEffectiveTaskSegments(task)
@@ -8660,7 +9174,7 @@ async function resolveMediaPlaylistFromUrl(url, task = null) {
     return parseM3U8Playlist(playlistText, response.url || normalizedUrl);
 }
 
-async function downloadStandaloneMediaPlaylistParts(url, task) {
+async function downloadStandaloneMediaPlaylistParts(url, task, options = {}) {
     const parsed = await resolveMediaPlaylistFromUrl(url, task);
     if (parsed.type !== 'media' || parsed.container !== 'fmp4' || !isPlaylistEncryptionSupported(parsed.encryption)) {
         throw new Error(UNSUPPORTED_M3U8_TYPE_ERROR);
@@ -8684,28 +9198,54 @@ async function downloadStandaloneMediaPlaylistParts(url, task) {
     };
     const initBytesCache = new Map();
     const downloadedSegments = [];
+    const kind = String(options?.kind || 'audio');
+    const onProgress = typeof options?.onProgress === 'function' ? options.onProgress : null;
+    let downloadedBytes = 0;
+    const retainedParts = new Set();
 
-    for (const segment of standaloneTask.segments) {
-        const initBytes = await getCachedFmp4InitBytes(standaloneTask, segment, null, initBytesCache);
-        const bytes = await downloadSegment(standaloneTask, segment, null);
-        downloadedSegments.push({
-            ...segment,
-            status: 'success',
-            bytes,
-            initBytes: initBytes instanceof Uint8Array ? initBytes : null
+    try {
+        for (const segment of standaloneTask.segments) {
+            const initBytes = await getCachedFmp4InitBytes(standaloneTask, segment, null, initBytesCache);
+            if (initBytes instanceof Uint8Array) retainedParts.add(initBytes);
+            const bytes = await downloadSegment(standaloneTask, segment, null);
+            if (bytes instanceof Uint8Array) retainedParts.add(bytes);
+            downloadedBytes += Number(bytes?.byteLength) || 0;
+            downloadedSegments.push({
+                ...segment,
+                status: 'success',
+                bytes,
+                initBytes: initBytes instanceof Uint8Array ? initBytes : null
+            });
+            onProgress?.({
+                kind,
+                completedSegments: downloadedSegments.length,
+                totalSegments: standaloneTask.segments.length,
+                downloadedBytes,
+                byteLength: Number(bytes?.byteLength) || 0,
+                timestamp: Date.now()
+            });
+        }
+
+        return getFmp4CompletedTaskExportParts({
+            ...standaloneTask,
+            segments: downloadedSegments
         });
+    } catch (error) {
+        releaseRenditionOutputParts([{ parts: [...retainedParts] }]);
+        throw error;
     }
-
-    return getFmp4CompletedTaskExportParts({
-        ...standaloneTask,
-        segments: downloadedSegments
-    });
 }
 
 async function downloadSelectedMediaRenditions(task, options = {}) {
     const outputs = [];
     const onBeforeDownload = typeof options?.onBeforeDownload === 'function'
         ? options.onBeforeDownload
+        : null;
+    const onProgress = typeof options?.onProgress === 'function'
+        ? options.onProgress
+        : null;
+    const onOutput = typeof options?.onOutput === 'function'
+        ? options.onOutput
         : null;
     const renditions = Array.isArray(task?.mediaRenditions) ? task.mediaRenditions : [];
     const selectedAudio = renditions.find(rendition => (
@@ -8714,18 +9254,28 @@ async function downloadSelectedMediaRenditions(task, options = {}) {
     const selectedSubtitle = renditions.find(rendition => (
         String(rendition?.id || '') === String(task?.selectedSubtitleRenditionId || '')
     ));
+    const outputTracks = task?.outputTracks || {};
+    const shouldDownloadAudio = Boolean(selectedAudio?.uri)
+        && outputTracks.audio?.status !== 'save_triggered';
+    const shouldDownloadSubtitle = Boolean(selectedSubtitle?.uri)
+        && outputTracks.subtitle?.status !== 'save_triggered';
 
-    if (selectedAudio?.uri) {
+    if (shouldDownloadAudio) {
         onBeforeDownload?.('audio');
-        outputs.push({
+        const audioOutput = {
             kind: 'audio',
-            parts: await downloadStandaloneMediaPlaylistParts(selectedAudio.uri, task),
-            fileName: `${getTaskOutputBaseName(task)}.audio.m4a`,
+            parts: await downloadStandaloneMediaPlaylistParts(selectedAudio.uri, task, {
+                kind: 'audio',
+                onProgress
+            }),
+            fileName: buildRenditionOutputFileName(task, selectedAudio, 'audio'),
             mimeType: 'audio/mp4'
-        });
+        };
+        outputs.push(audioOutput);
+        await onOutput?.(audioOutput);
     }
 
-    if (selectedSubtitle?.uri) {
+    if (shouldDownloadSubtitle) {
         onBeforeDownload?.('subtitle');
         const subtitlePlaylist = await resolveMediaPlaylistFromUrl(selectedSubtitle.uri, task);
         if (
@@ -8737,6 +9287,7 @@ async function downloadSelectedMediaRenditions(task, options = {}) {
         }
 
         const subtitleTexts = [];
+        let downloadedBytes = 0;
         for (const segment of subtitlePlaylist.segments) {
             const subtitleText = await withDownloadRequestLease(task, segment.url, async signal => {
                 const response = await fetch(segment.url, signal ? { signal } : undefined);
@@ -8749,14 +9300,29 @@ async function downloadSelectedMediaRenditions(task, options = {}) {
                 return response.text();
             });
             subtitleTexts.push(subtitleText);
+            downloadedBytes += typeof TextEncoder === 'function'
+                ? new TextEncoder().encode(String(subtitleText || '')).byteLength
+                : String(subtitleText || '').length;
+            onProgress?.({
+                kind: 'subtitle',
+                completedSegments: subtitleTexts.length,
+                totalSegments: subtitlePlaylist.segments.length,
+                downloadedBytes,
+                byteLength: typeof TextEncoder === 'function'
+                    ? new TextEncoder().encode(String(subtitleText || '')).byteLength
+                    : String(subtitleText || '').length,
+                timestamp: Date.now()
+            });
         }
 
-        outputs.push({
+        const subtitleOutput = {
             kind: 'subtitle',
             parts: [mergeWebVttSegments(subtitleTexts)],
-            fileName: `${getTaskOutputBaseName(task)}.subtitles.vtt`,
+            fileName: buildRenditionOutputFileName(task, selectedSubtitle, 'subtitle'),
             mimeType: 'text/vtt'
-        });
+        };
+        outputs.push(subtitleOutput);
+        await onOutput?.(subtitleOutput);
     }
 
     return outputs;
@@ -8876,12 +9442,66 @@ async function exportTaskAsTs(task) {
 
     assertCurrent();
     const outputFileName = buildTaskOutputFileName(task);
-    try {
-        await triggerTaskDownload(task, orderedParts, outputFileName);
-        assertCurrent();
-    } catch (error) {
-        showRuntimeErrorToast(error, 'MP4 不兼容，建议改用 TS');
-        throw error;
+    const getLatestTask = () => (
+        typeof findTaskById === 'function' ? (findTaskById(task.id) || task) : task
+    );
+    const getOutputTracks = currentTask => (
+        currentTask?.outputTracks
+        || (typeof createTaskOutputTracks === 'function' ? createTaskOutputTracks(currentTask) : {
+            video: { kind: 'video', selected: true, status: 'waiting' },
+            audio: { kind: 'audio', selected: Boolean(currentTask?.selectedAudioRenditionId), status: 'waiting' },
+            subtitle: { kind: 'subtitle', selected: Boolean(currentTask?.selectedSubtitleRenditionId), status: 'waiting' }
+        })
+    );
+    const setOutputTrack = (kind, trackPatch, taskPatch = {}, render = 'live') => updateTask(task.id, currentTask => {
+        const outputTracks = getOutputTracks(currentTask);
+        return {
+            ...currentTask,
+            ...taskPatch,
+            activeOutputTrackKind: kind,
+            outputTracks: {
+                ...outputTracks,
+                [kind]: {
+                    ...outputTracks[kind],
+                    ...trackPatch
+                }
+            }
+        };
+    }, { render });
+
+    const initialTracks = getOutputTracks(getLatestTask());
+    if (initialTracks.video?.status !== 'save_triggered') {
+        setOutputTrack('video', {
+            status: 'assembling',
+            completedSegments: segments.length,
+            totalSegments: segments.length,
+            downloadedBytes: Math.max(0, Number(task.downloadedBytes) || 0),
+            errorMessage: ''
+        }, {
+            status: 'finalizing',
+            progress: 100,
+            outputFileName,
+            finalizingMessage: '生成视频文件中',
+            errorMessage: ''
+        });
+        try {
+            await triggerTaskDownload(task, orderedParts, outputFileName);
+            assertCurrent();
+            setOutputTrack('video', {
+                status: 'save_triggered',
+                completedSegments: segments.length,
+                totalSegments: segments.length,
+                fileName: outputFileName,
+                errorMessage: ''
+            }, {
+                progress: 100,
+                finalizingMessage: '视频已触发保存',
+                errorMessage: ''
+            });
+        } catch (error) {
+            showRuntimeErrorToast(error, 'MP4 不兼容，建议改用 TS');
+            throw error;
+        }
     }
 
     if (task.selectedAudioRenditionId || task.selectedSubtitleRenditionId) {
@@ -8892,58 +9512,169 @@ async function exportTaskAsTs(task) {
             if (task.selectedSubtitleRenditionId) return '保存字幕中';
             return '正在保存外部音轨/字幕…';
         };
+        const speedSamplers = new Map();
         const setFinalizingMessage = (kind) => {
             const finalizingMessage = getFinalizingMessage(kind);
-            updateTask(task.id, currentTask => {
-                if (currentTask?.status === 'finalizing' && currentTask?.finalizingMessage === finalizingMessage) {
-                    return null;
-                }
-                return {
-                    ...currentTask,
+            if (!speedSamplers.has(kind)) {
+                speedSamplers.set(kind, typeof createDownloadSpeedSampler === 'function'
+                    ? createDownloadSpeedSampler()
+                    : { record: () => 0 });
+            }
+            setOutputTrack(kind, {
+                status: 'downloading',
+                completedSegments: 0,
+                totalSegments: 0,
+                failedSegments: 0,
+                downloadedBytes: 0,
+                speed: 0,
+                eta: 0,
+                errorMessage: ''
+            }, {
+                status: 'finalizing',
+                progress: 0,
+                downloadSpeedBytesPerSecond: 0,
+                estimatedRemainingSeconds: 0,
+                outputFileName,
+                finalizingMessage,
+                errorMessage: ''
+            });
+        };
+
+        const updateRenditionProgress = event => {
+            const kind = String(event?.kind || '');
+            if (!['audio', 'subtitle'].includes(kind)) return;
+            const completedSegments = Math.max(0, Number(event?.completedSegments) || 0);
+            const totalSegments = Math.max(0, Number(event?.totalSegments) || 0);
+            const downloadedBytes = Math.max(0, Number(event?.downloadedBytes) || 0);
+            const speed = kind === 'audio'
+                ? Math.max(0, Number(speedSamplers.get(kind)?.record(event?.byteLength, event?.timestamp)) || 0)
+                : 0;
+            const averageSegmentBytes = completedSegments > 0 ? downloadedBytes / completedSegments : 0;
+            const estimatedRemainingBytes = Math.max(0, totalSegments - completedSegments) * averageSegmentBytes;
+            const eta = kind === 'audio' && speed > 0
+                ? Math.ceil(estimatedRemainingBytes / speed)
+                : 0;
+            const progress = totalSegments > 0
+                ? normalizeTaskProgress((completedSegments / totalSegments) * 100)
+                : 0;
+            setOutputTrack(kind, {
+                status: 'downloading',
+                completedSegments,
+                totalSegments,
+                downloadedBytes,
+                speed,
+                eta
+            }, {
+                status: 'finalizing',
+                progress,
+                downloadSpeedBytesPerSecond: speed,
+                estimatedRemainingSeconds: eta,
+                finalizingMessage: kind === 'audio' ? '下载音轨中' : '下载字幕中',
+                errorMessage: ''
+            });
+        };
+
+        const triggeredOutputs = new Set();
+        const triggerRenditionOutput = async output => {
+            if (!output || triggeredOutputs.has(output)) return;
+            const kind = String(output.kind || '').trim()
+                || (String(output.mimeType || '').startsWith('audio/') ? 'audio' : 'subtitle');
+            const currentTrack = getOutputTracks(getLatestTask())[kind] || {};
+            setOutputTrack(kind, { status: 'assembling', speed: 0, eta: 0 }, {
+                status: 'finalizing',
+                progress: 100,
+                downloadSpeedBytesPerSecond: 0,
+                estimatedRemainingSeconds: 0,
+                finalizingMessage: kind === 'audio' ? '保存音轨中' : '保存字幕中',
+                errorMessage: ''
+            });
+            try {
+                await triggerSeparateRenditionDownloads(task, [output]);
+                assertCurrent();
+                triggeredOutputs.add(output);
+                setOutputTrack(kind, {
+                    ...currentTrack,
+                    status: 'save_triggered',
+                    completedSegments: Math.max(Number(currentTrack.completedSegments) || 0, Number(currentTrack.totalSegments) || 0),
+                    fileName: output.fileName,
+                    speed: 0,
+                    eta: 0,
+                    errorMessage: ''
+                }, {
                     status: 'finalizing',
                     progress: 100,
                     downloadSpeedBytesPerSecond: 0,
                     estimatedRemainingSeconds: 0,
-                    outputFileName,
-                    finalizingMessage,
-                    errorMessage: '正在保存外部音轨/字幕…'
-                };
-            }, { render: 'live' });
+                    finalizingMessage: kind === 'audio' ? '音轨已触发保存' : '字幕已触发保存',
+                    errorMessage: ''
+                });
+            } finally {
+                if (typeof releaseRenditionOutputParts === 'function') {
+                    releaseRenditionOutputParts([output]);
+                }
+            }
         };
 
         updateTask(task.id, currentTask => ({
             ...currentTask,
             status: 'finalizing',
-            progress: 100,
+            progress: 0,
             downloadSpeedBytesPerSecond: 0,
             estimatedRemainingSeconds: 0,
             outputFileName,
             finalizingMessage: getFinalizingMessage(),
-            errorMessage: '正在保存外部音轨/字幕…'
+            errorMessage: ''
         }));
 
+        let extraOutputs = [];
         try {
-            const extraOutputs = await downloadSelectedMediaRenditions(task, {
-                onBeforeDownload: setFinalizingMessage
+            extraOutputs = await downloadSelectedMediaRenditions(task, {
+                onBeforeDownload: setFinalizingMessage,
+                onProgress: updateRenditionProgress,
+                onOutput: triggerRenditionOutput
             });
-            await triggerSeparateRenditionDownloads(task, extraOutputs);
+            for (const output of extraOutputs) {
+                if (!triggeredOutputs.has(output)) await triggerRenditionOutput(output);
+            }
             assertCurrent();
             completeTask(task.id, outputFileName);
             showToast('当前 fMP4 音视频合成暂不支持，已分别保存；直接打开视频可能无声，需要手动加载音轨或合并后播放。', { type: 'info' });
         } catch (error) {
+            if ((typeof isUserAbortError === 'function' && isUserAbortError(error))
+                || getLatestTask()?.status === 'paused') {
+                throw error;
+            }
             assertCurrent();
             const detail = getUserFacingErrorMessage(error, '音轨或字幕分别保存失败');
+            const failedKind = String(getLatestTask()?.activeOutputTrackKind || 'audio');
             updateTask(task.id, currentTask => ({
                 ...currentTask,
                 status: 'partial_completed',
-                progress: 100,
+                progress: typeof getTaskActiveStageProgress === 'function'
+                    ? getTaskActiveStageProgress(currentTask).progress
+                    : 100,
                 downloadSpeedBytesPerSecond: 0,
                 estimatedRemainingSeconds: 0,
                 outputFileName,
                 finalizingMessage: '',
-                errorMessage: `视频已保存，但音轨或字幕分别保存失败。${detail ? ` ${detail}` : ''}`
+                outputTracks: {
+                    ...getOutputTracks(currentTask),
+                    [failedKind]: {
+                        ...getOutputTracks(currentTask)[failedKind],
+                        status: 'failed',
+                        failedSegments: Math.max(1, Number(getOutputTracks(currentTask)[failedKind]?.failedSegments) || 0),
+                        speed: 0,
+                        eta: 0,
+                        errorMessage: detail
+                    }
+                },
+                errorMessage: `视频已触发保存，但音轨或字幕分别保存失败。${detail ? ` ${detail}` : ''}`
             }));
-            showToast(`视频已保存，但音轨或字幕分别保存失败。${detail ? ` ${detail}` : ''}`, { type: 'error' });
+            showToast(`视频已触发保存，但音轨或字幕分别保存失败。${detail ? ` ${detail}` : ''}`, { type: 'error' });
+        } finally {
+            if (typeof releaseRenditionOutputParts === 'function') {
+                releaseRenditionOutputParts(extraOutputs.filter(output => !triggeredOutputs.has(output)));
+            }
         }
         return;
     }
@@ -9361,26 +10092,48 @@ function pauseTask(taskId) {
         };
 
     const taskBeforePause = findTaskById(taskId);
-    if (['downloading', 'detecting', 'resolving', 'queued'].includes(taskBeforePause?.status)
+    if (['downloading', 'detecting', 'resolving', 'queued', 'finalizing'].includes(taskBeforePause?.status)
         && typeof cancelPendingTaskFinalExports === 'function') {
         cancelPendingTaskFinalExports(taskId);
     }
 
     const pausedTask = updateTask(taskId, task => {
-        if (!['downloading', 'detecting', 'resolving', 'queued'].includes(task.status)) {
+        if (!['downloading', 'detecting', 'resolving', 'queued', 'finalizing'].includes(task.status)) {
             return task;
         }
 
-        const shouldKeepStreamWriterOpen = Boolean(task.streamSave && taskStreamWriters.has(String(taskId)));
+        const isRenditionFinalizing = task.status === 'finalizing'
+            && ['audio', 'subtitle'].includes(String(task.activeOutputTrackKind || ''));
+        const shouldKeepStreamWriterOpen = !isRenditionFinalizing
+            && Boolean(task.streamSave && taskStreamWriters.has(String(taskId)));
         if (!shouldKeepStreamWriterOpen) {
             abortRequests(taskId);
         }
 
+        const activeOutputKind = String(task.activeOutputTrackKind || '');
+        const outputTracks = task.outputTracks && isRenditionFinalizing
+            ? {
+                ...task.outputTracks,
+                [activeOutputKind]: {
+                    ...task.outputTracks[activeOutputKind],
+                    status: 'paused',
+                    completedSegments: 0,
+                    failedSegments: 0,
+                    downloadedBytes: 0,
+                    speed: 0,
+                    eta: 0,
+                    errorMessage: ''
+                }
+            }
+            : task.outputTracks;
+
         return {
             ...task,
             status: 'paused',
+            outputTracks,
             downloadSpeedBytesPerSecond: 0,
             estimatedRemainingSeconds: 0,
+            finalizingMessage: '',
             segments: Array.isArray(task.segments)
                 ? task.segments.map(segment => (
                     segment.status === 'downloading' && !shouldKeepStreamWriterOpen
@@ -9451,6 +10204,40 @@ function restartTaskFromIncompleteSegments(taskId, options = {}) {
     const resumedTask = updateTask(taskId, task => {
         if (!['failed', 'recoverable', 'partial_completed'].includes(task.status)) {
             return task;
+        }
+
+        const outputTracks = task.outputTracks || {};
+        const failedRenditionKind = ['audio', 'subtitle'].find(kind => (
+            outputTracks[kind]?.selected
+            && ['failed', 'paused'].includes(String(outputTracks[kind]?.status || ''))
+        ));
+        if (task.status === 'partial_completed' && failedRenditionKind) {
+            return {
+                ...task,
+                status: 'queued',
+                errorMessage: '',
+                finalizingMessage: '',
+                recoveryMode: 'rendition',
+                recoveryTargetSequence: 0,
+                activeOutputTrackKind: failedRenditionKind,
+                downloadSpeedBytesPerSecond: 0,
+                estimatedRemainingSeconds: 0,
+                outputTracks: {
+                    ...outputTracks,
+                    [failedRenditionKind]: {
+                        ...outputTracks[failedRenditionKind],
+                        status: 'waiting',
+                        completedSegments: 0,
+                        totalSegments: 0,
+                        failedSegments: 0,
+                        downloadedBytes: 0,
+                        speed: 0,
+                        eta: 0,
+                        fileName: '',
+                        errorMessage: ''
+                    }
+                }
+            };
         }
 
         return {

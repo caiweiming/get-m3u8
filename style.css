@@ -2077,6 +2077,83 @@ svg.task-row__status-icon {
     font-size: 1rem;
 }
 
+.task-fragment-detail__tracks {
+    min-width: 0;
+}
+
+.task-fragment-detail__track-list {
+    display: grid;
+    gap: 0.5rem;
+}
+
+.task-fragment-detail__track {
+    display: grid;
+    grid-template-columns: minmax(0, 14rem) minmax(8rem, 1fr) minmax(0, 11rem);
+    align-items: center;
+    gap: 0.75rem;
+    min-width: 0;
+    padding: 0.625rem 0.75rem;
+    border-top: 1px solid var(--border-color);
+}
+
+.task-fragment-detail__track:last-child {
+    border-bottom: 1px solid var(--border-color);
+}
+
+.task-fragment-detail__track-heading {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.task-fragment-detail__track-name {
+    overflow: hidden;
+    color: var(--text-main);
+    font-size: 0.8125rem;
+    font-weight: 650;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.task-fragment-detail__track-status,
+.task-fragment-detail__track-meta {
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    line-height: 1.35;
+}
+
+.task-fragment-detail__track-status {
+    flex: none;
+}
+
+.task-fragment-detail__track-meta {
+    overflow: hidden;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.task-fragment-detail__track-progress {
+    height: 0.25rem;
+    overflow: hidden;
+    border-radius: 4px;
+    background: rgba(38, 40, 43, 0.1);
+}
+
+.task-fragment-detail__track-progress span {
+    display: block;
+    width: 0;
+    height: 100%;
+    border-radius: 4px;
+    background: var(--btn-black);
+    transition: width 180ms ease;
+}
+
+[data-theme="dark"] .task-fragment-detail__track-progress {
+    background: rgba(255, 255, 255, 0.12);
+}
+
 .task-fragment-detail__diagnostics {
     min-width: 0;
 }
@@ -3071,6 +3148,16 @@ svg.task-row__status-icon {
 
     .task-fragment-detail__context {
         grid-template-columns: 1fr;
+    }
+
+    .task-fragment-detail__track {
+        grid-template-columns: 1fr;
+        gap: 0.4rem;
+    }
+
+    .task-fragment-detail__track-meta {
+        text-align: left;
+        white-space: normal;
     }
 
     .task-fragment-grid-scroll {
