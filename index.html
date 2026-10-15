@@ -4,30 +4,28 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>M3U8下载</title>
-    <meta name="description" content="M3U8下载是纯浏览器 HLS 下载与播放工具，支持 m3u8 在线预览播放、AES-128 解密、分片下载、TS 保存、MP4 导出、范围下载和任务恢复。">
-    <meta name="keywords" content="m3u8下载,m3u8播放器,m3u8在线播放,HLS下载,HLS播放器,AES-128,TS,MP4,视频分片下载,m3u8 downloader">
+    <meta name="description" content="M3U8下载是纯浏览器 HLS 下载与播放工具，支持 m3u8 在线预览、AES-128 解密、TS 分片下载、范围下载和页面内任务控制。">
+    <meta name="keywords" content="m3u8下载,m3u8播放器,m3u8在线播放,HLS下载,HLS播放器,AES-128,TS,视频分片下载,m3u8 downloader">
     <meta name="author" content="getm3u8.com">
-    <meta name="application-version" content="v1.2.0">
+    <meta name="application-version" content="v1.2.1">
     <meta name="robots" content="index, follow">
     <meta name="theme-color" content="#26282b">
     <link rel="canonical" href="https://getm3u8.com/">
     <meta property="og:title" content="M3U8下载">
-    <meta property="og:description" content="纯浏览器 m3u8 / HLS 下载与播放工具，支持在线预览播放、AES-128、TS/MP4、范围下载、分片状态和任务恢复。">
+    <meta property="og:description" content="纯浏览器 m3u8 / HLS 下载与播放工具，支持在线预览、AES-128、TS 保存、范围下载和页面内任务控制。">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://getm3u8.com/">
     <meta name="twitter:card" content="summary">
     <meta name="twitter:title" content="M3U8下载">
     <meta name="twitter:description" content="纯浏览器 m3u8 / HLS 下载与播放工具，支持在线播放、分片下载、解密、保存和恢复。">
-    <link rel="icon" href="favicon.svg?v=202610080110" type="image/svg+xml">
-    <link rel="stylesheet" href="style.css?v=202610080110">
+    <link rel="icon" href="favicon.svg?v=202610150001" type="image/svg+xml">
+    <link rel="stylesheet" href="style.css?v=202610150001">
     <!-- Lucide Icons (local vendor bundle) -->
-    <script src="vendor/lucide.min.js?v=202610080110"></script>
+    <script src="vendor/lucide.min.js?v=202610150001"></script>
     <!-- HLS preview runtime (local vendor bundle) -->
-    <script src="vendor/hls.min.js?v=202610080110"></script>
+    <script src="vendor/hls.min.js?v=202610150001"></script>
     <!-- TS to MP4 transmux runtime (local vendor bundle) -->
-    <script src="vendor/mux.min.js?v=202610080110"></script>
-    <!-- StreamSaver fallback runtime (local vendor bundle) -->
-    <script src="vendor/streamsaver.js?v=202610080110"></script>
+    <script src="vendor/mux.min.js?v=202610150001"></script>
 </head>
 <body>
     <div id="app-loader" class="app-loader" aria-hidden="true"></div>
@@ -59,8 +57,6 @@
         </header>
 
         <main class="app-main">
-            <div id="task-coordination-notice" class="task-coordination-notice hidden" role="status" aria-live="polite"></div>
-
             <!-- Hero Section (Default State) -->
             <section id="hero-section" class="hero-section">
                 <div class="hero-actions-group">
@@ -111,42 +107,12 @@
                         </div>
                     </div>
                 </div>
-                <div id="aggregate-download-status" class="download-runtime-summary" role="status" aria-live="polite" aria-label="下载运行状态">
-                    <div class="download-runtime-summary__metric download-runtime-summary__metric--primary">
-                        <span>总速度</span>
-                        <strong id="aggregate-download-speed">0 B/s</strong>
-                        <span id="aggregate-task-mode" class="download-runtime-summary__mode">单任务模式</span>
-                    </div>
-                    <div class="download-runtime-summary__metric download-runtime-summary__metric--secondary download-runtime-summary__metric--active">
-                        <span>活动任务</span>
-                        <strong id="aggregate-active-tasks">0</strong>
-                    </div>
-                    <div class="download-runtime-summary__metric download-runtime-summary__metric--secondary download-runtime-summary__metric--requests">
-                        <span>请求槽</span>
-                        <strong id="aggregate-request-slots">0 / 8</strong>
-                        <small id="aggregate-request-state">可用</small>
-                    </div>
-                </div>
-                <div id="task-cache-status-bar" class="task-cache-status-bar" aria-label="本地缓存状态">
-                    <div class="task-cache-status-bar__main">
-                        <span class="task-cache-status-bar__label">本地缓存</span>
-                        <span id="segment-cache-availability" class="task-cache-status-bar__pill">检测中</span>
-                        <span>可恢复 <strong id="segment-cache-records">--</strong> 分片</span>
-                        <span>占用 <strong id="segment-cache-bytes">--</strong></span>
-                        <span>浏览器存储 <strong id="segment-cache-storage">--</strong></span>
-                        <span>用于断点续传，完成任务会自动清理</span>
-                    </div>
-                    <div class="task-cache-status-bar__actions">
-                        <button type="button" id="segment-cache-clean-orphans-btn" class="secondary-btn">清理无效</button>
-                        <button type="button" id="segment-cache-clear-btn" class="danger-btn">清空缓存</button>
-                    </div>
-                </div>
                 <div id="task-list" class="task-list"></div>
             </section>
         </main>
 
         <footer class="app-footer">
-            <p>© 2026 M3U8下载. All rights reserved. <span class="app-footer__separator" aria-hidden="true">·</span> <span class="app-version">v1.2.0</span></p>
+            <p>© 2026 M3U8下载. All rights reserved. <span class="app-footer__separator" aria-hidden="true">·</span> <span class="app-version">v1.2.1</span></p>
         </footer>
 
         <!-- Modals -->
@@ -190,18 +156,18 @@
                                 <span class="form-choice-indicator" aria-hidden="true"></span>
                                 <span>TS</span>
                             </label>
-                            <label class="form-choice" for="new-format-mp4">
-                                <input type="radio" id="new-format-mp4" name="new-format" value="mp4">
+                            <label class="form-choice hidden" for="new-format-mp4" data-experimental-only>
+                                <input type="radio" id="new-format-mp4" name="new-format" value="mp4" data-experimental-control>
                                 <span class="form-choice-indicator" aria-hidden="true"></span>
-                                <span>MP4</span>
+                                <span>MP4（实验）</span>
                             </label>
                         </div>
                     </div>
-                    <div class="form-item">
+                    <div class="form-item hidden" data-experimental-only>
                         <label for="new-stream-save">保存模式</label>
                         <label class="form-checkbox" for="new-stream-save">
-                            <input type="checkbox" id="new-stream-save">
-                            <span>边下边存</span>
+                            <input type="checkbox" id="new-stream-save" data-experimental-control>
+                            <span>边下边存（实验）</span>
                         </label>
                         <p class="form-help">开启后会在下载过程中尽量直接写入文件，减少一次性内存占用；浏览器不支持时会自动降级。</p>
                     </div>
@@ -229,8 +195,8 @@
                 <div class="modal-body">
                     <div id="download-option-tabs" class="download-option-tabs" role="tablist" aria-label="下载选项">
                         <button class="download-option-tab is-active" type="button" role="tab" aria-selected="true" data-download-option-tab="quality" data-download-option-panel="download-quality-panel">分辨率</button>
-                        <button class="download-option-tab hidden" type="button" role="tab" aria-selected="false" data-download-option-tab="audio" data-download-option-panel="download-audio-rendition-panel">音轨</button>
-                        <button class="download-option-tab hidden" type="button" role="tab" aria-selected="false" data-download-option-tab="subtitle" data-download-option-panel="download-subtitle-rendition-panel">字幕</button>
+                        <button class="download-option-tab hidden" type="button" role="tab" aria-selected="false" data-download-option-tab="audio" data-download-option-panel="download-audio-rendition-panel" data-experimental-only>音轨（实验）</button>
+                        <button class="download-option-tab hidden" type="button" role="tab" aria-selected="false" data-download-option-tab="subtitle" data-download-option-panel="download-subtitle-rendition-panel" data-experimental-only>字幕（实验）</button>
                     </div>
                     <section id="download-quality-panel" class="download-option-panel" data-download-option-panel="quality">
                         <p id="download-quality-empty" class="form-note hidden">暂无可选清晰度，请返回检查播放列表内容。</p>
@@ -246,13 +212,13 @@
                             </label>
                         </div>
                     </section>
-                    <section id="download-audio-rendition-panel" class="download-option-panel hidden" data-download-option-panel="audio">
+                    <section id="download-audio-rendition-panel" class="download-option-panel hidden" data-download-option-panel="audio" data-experimental-only>
                         <section id="download-audio-rendition-section" class="download-rendition-section hidden">
                             <h4>音轨</h4>
                             <div id="download-audio-rendition-list" class="download-rendition-list" role="radiogroup" aria-label="下载音轨列表"></div>
                         </section>
                     </section>
-                    <section id="download-subtitle-rendition-panel" class="download-option-panel hidden" data-download-option-panel="subtitle">
+                    <section id="download-subtitle-rendition-panel" class="download-option-panel hidden" data-download-option-panel="subtitle" data-experimental-only>
                         <section id="download-subtitle-rendition-section" class="download-rendition-section hidden">
                             <h4>字幕</h4>
                             <div id="download-subtitle-rendition-list" class="download-rendition-list" role="radiogroup" aria-label="下载字幕列表"></div>
@@ -307,7 +273,7 @@
                 <div class="modal-body">
                     <div class="force-merge-summary">
                         <p class="force-merge-summary__eyebrow">部分导出</p>
-                        <h4 id="force-merge-task-title" class="force-merge-summary__title">选择合并方式</h4>
+                        <h4 id="force-merge-task-title" class="force-merge-summary__title">连续合并</h4>
                         <p id="force-merge-task-meta" class="force-merge-summary__meta">将只使用当前已下载成功的视频碎片。</p>
                     </div>
                     <div id="force-merge-mode-list" class="force-merge-mode-list" role="radiogroup" aria-label="强制合并方式">
@@ -318,19 +284,9 @@
                                 <span class="force-merge-option__title">连续合并</span>
                                 <span class="force-merge-option__meta">从当前范围起点开始，只导出连续成功的碎片。</span>
                             </span>
-                            <span class="force-merge-option__badge">推荐</span>
-                        </label>
-                        <label class="force-merge-option" for="force-merge-mode-discrete">
-                            <input type="radio" id="force-merge-mode-discrete" name="force-merge-mode" value="discrete">
-                            <span class="form-choice-indicator" aria-hidden="true"></span>
-                            <span class="force-merge-option__content">
-                                <span class="force-merge-option__title">离散硬拼</span>
-                                <span class="force-merge-option__meta">实验性：会跳过缺失碎片，可能出现跳播、卡顿、黑屏或音画异常。</span>
-                            </span>
-                            <span class="force-merge-option__badge">实验性</span>
                         </label>
                     </div>
-                    <p id="force-merge-warning" class="form-note hidden">离散硬拼仅支持 TS。</p>
+                    <p id="force-merge-warning" class="form-note hidden">只会导出从当前范围起点开始连续成功的碎片。</p>
                 </div>
                 <div class="modal-footer">
                     <button class="secondary-btn close-modal-btn">取消</button>
@@ -395,44 +351,36 @@
                     <button class="close-modal-btn modal-close-btn"><i data-lucide="x"></i></button>
                 </div>
                 <div class="modal-body">
+                    <div class="form-item settings-experimental-toggle">
+                        <label for="setting-experimental-features">实验功能</label>
+                        <label class="form-checkbox" for="setting-experimental-features">
+                            <input type="checkbox" id="setting-experimental-features">
+                            <span>启用实验功能（非稳定）</span>
+                        </label>
+                        <p class="form-help">开启后可使用 MP4、fMP4/Byte Range、外部音轨或字幕及边下边存；这些能力受浏览器、编码和安全上下文影响。</p>
+                    </div>
                     <div class="form-item">
                         <label for="setting-title-tpl">保存标题模板</label>
                         <input type="text" id="setting-title-tpl" placeholder="video-{id}">
                     </div>
-                    <div class="form-item">
+                    <div class="form-item hidden" data-experimental-only>
                         <label for="setting-stream-save">保存模式</label>
                         <label class="form-checkbox" for="setting-stream-save">
-                            <input type="checkbox" id="setting-stream-save">
-                            <span>边下边存</span>
+                            <input type="checkbox" id="setting-stream-save" data-experimental-control>
+                            <span>边下边存（实验）</span>
                         </label>
                         <p class="form-help">作为默认偏好，新建任务时会自动带入；浏览器不支持时会自动降级。</p>
-                    </div>
-                    <div class="form-item">
-                        <label for="setting-segment-cache">断点续传缓存</label>
-                        <label class="form-checkbox" for="setting-segment-cache">
-                            <input type="checkbox" id="setting-segment-cache" checked>
-                            <span>启用 IndexedDB 分片缓存</span>
-                        </label>
-                        <p class="form-help">开启后可在刷新页面后继续未完成下载；完成任务会自动清理对应缓存，关闭后可减少浏览器存储占用。</p>
                     </div>
                     <div class="form-item">
                         <label for="setting-format">保存格式</label>
                         <select id="setting-format">
                             <option value="ts">TS</option>
-                            <option value="mp4">MP4</option>
+                            <option value="mp4" data-experimental-only data-experimental-control>MP4（实验）</option>
                         </select>
                     </div>
                     <div class="form-item">
                         <label for="setting-concurrency">默认并发数</label>
                         <input type="number" id="setting-concurrency" value="4" min="1" max="8">
-                    </div>
-                    <div class="form-item">
-                        <label for="setting-parallel-task-downloads">任务运行模式</label>
-                        <label class="form-checkbox" for="setting-parallel-task-downloads">
-                            <input type="checkbox" id="setting-parallel-task-downloads">
-                            <span>允许多个任务同时下载</span>
-                        </label>
-                        <p class="form-help">会提高浏览器的网络、存储和设备资源占用。</p>
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -456,9 +404,8 @@
                             <h4><i data-lucide="rocket" aria-hidden="true"></i>快速开始</h4>
                             <ol>
                                 <li>点击“新建下载”，粘贴 m3u8 地址。</li>
-                                <li>按需填写保存标题、保存格式、下载范围和并发数。</li>
+                                <li>按需填写保存标题、下载范围和分片并发数；稳定模式固定保存为 TS。</li>
                                 <li>点击“开始下载”，如存在多个清晰度，先选择分辨率。</li>
-                                <li>如果源提供多轨媒体，可选择可用的外部音轨和 WebVTT 字幕。</li>
                                 <li>下载完成后，浏览器会保存对应的视频文件。</li>
                             </ol>
                         </section>
@@ -466,6 +413,8 @@
                             <h4><i data-lucide="list-checks" aria-hidden="true"></i>任务操作</h4>
                             <ul>
                                 <li>下载按钮用于开始或重新下载可恢复任务。</li>
+                                <li>任务只保存在当前页面内存，并按创建顺序逐个执行；新标签页不会共享任务。</li>
+                                <li>刷新或关闭页面会丢失未完成任务，离开前浏览器会请求确认。</li>
                                 <li>暂停会中止当前网络请求，再次点击可继续未完成分片。</li>
                                 <li>播放可打开预览窗口，删除会先弹出确认。</li>
                                 <li>勾选任务后，可使用顶部批量开始、暂停、删除。</li>
@@ -475,9 +424,9 @@
                             <h4><i data-lucide="sliders-horizontal" aria-hidden="true"></i>高级能力</h4>
                             <ul>
                                 <li>范围下载会在解析出真实分片后确认起止片号。</li>
-                                <li>边下边存可降低内存占用，但不支持强制合并。</li>
-                                <li>本地缓存用于刷新后恢复已下载分片，可在任务列表上方管理。</li>
-                                <li>独立音轨、字幕会分别保存为独立文件；直接打开视频可能无声，需要手动加载音轨或合并后播放。</li>
+                                <li>普通下载分片保存在当前页面内存；占用较高时只提示一次，不会自动暂停。</li>
+                                <li>MP4、fMP4、外部音轨/字幕和边下边存仅供实验验证，可在“设置”中开启，不属于稳定支持。</li>
+                                <li>强制合并只导出从范围起点开始连续成功的本地分片。</li>
                                 <li>点击任务进度条可查看分片状态，失败分片可点击重试。</li>
                             </ul>
                         </section>
@@ -486,8 +435,8 @@
                             <ul>
                                 <li><code>source</code>：m3u8 地址，推荐 URL 编码。</li>
                                 <li><code>title</code>：预填保存标题。</li>
-                                <li><code>format</code>：<code>ts</code> 或 <code>mp4</code>。</li>
-                                <li><code>streamSave</code>：<code>1</code>/<code>true</code> 开启边下边存。</li>
+                                <li><code>format</code>：稳定模式固定为 <code>ts</code>。</li>
+                                <li><code>experimental</code>：旧链接兼容参数，不会绕过“设置”中的实验功能开关。</li>
                                 <li><code>range</code>：<code>all</code> 或 <code>custom</code>。</li>
                                 <li><code>concurrency</code>：分片并发数，范围 1-8。</li>
                                 <li><code>_ignore</code>：从 source 内部移除指定参数。</li>
@@ -496,7 +445,7 @@
                     </div>
                     <div class="help-modal__example" aria-label="快捷下载示例">
                         <span>示例：</span>
-                        <code>https://getm3u8.com?source=https%3A%2F%2Fexample.com%2Fvideo.m3u8&amp;title=demo&amp;format=mp4</code>
+                        <code>https://getm3u8.com?source=https%3A%2F%2Fexample.com%2Fvideo.m3u8&amp;title=demo&amp;format=ts</code>
                     </div>
                     <div class="help-modal__feedback" aria-label="联系与反馈">
                         <div>
@@ -524,7 +473,6 @@
         </div>
         <div id="app-tooltip" class="app-tooltip" aria-hidden="true"></div>
     </div>
-    <script src="task-coordination.js?v=202610080110"></script>
-    <script src="app.js?v=202610080110"></script>
+    <script src="app.js?v=202610150001"></script>
 </body>
 </html>
